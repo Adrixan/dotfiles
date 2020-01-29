@@ -19,9 +19,26 @@ call vundle#begin('~/.config/nvim/bundle')
 
 " let Vundle manage Vundle, required
 Plugin 'VundleVim/Vundle.vim'
+Plugin 'itchyny/lightline.vim'
 Plugin 'vim-syntastic/syntastic'
 Plugin 'airblade/vim-gitgutter'
 Plugin 'vimwiki/vimwiki'
+Plugin 'frazrepo/vim-rainbow'
+Plugin 'preservim/nerdtree'
 " All of your Plugins must be added before the following line
 call vundle#end()
 filetype plugin indent on  " allows auto-indenting depending on file type
+let g:rainbow_active = 1
+let g:lightline = {
+      \ 'colorscheme': 'wombat',
+      \ 'active': {
+      \   'left': [ [ 'mode', 'paste' ],
+      \             [ 'readonly', 'filename', 'modified', 'charvaluehex' ] ]
+      \ },
+      \ 'component': {
+      \   'charvaluehex': '0x%B'
+      \ },
+      \ }
+map <C-n> :NERDTreeToggle<CR>
+autocmd vimenter * NERDTree
+
