@@ -3910,6 +3910,27 @@ export HSTR_CONFIG=hicolor
 alias exa="exa --color=always -lh"
 alias please="sudo"
 
+#add some shortcuts
+#create and change into directory
+ccd() {
+    mkdir -p -- "$1" &&
+	cd -- "$1"
+}
+
+# Git add all and push
+function gacpp() {
+    git add -A
+    git commit -m "$*"
+    git pull
+    git push
+}
+
+alias :e='nvim'
+alias l='exa -la --git'
+alias tailf='tail -f'
+alias zdup='sudo zypper dup'
+alias rm='rm -vI'
+
 echo "Use progress to track cp/mv/etc."
 echo "Remember tmuxinator for tmux profiles"
 echo "You can use bro or cheat instead of man"
