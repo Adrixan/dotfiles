@@ -1,0 +1,10 @@
+/VirtualBox VMs/
+/FiraxisLive/
+/.steam/
+/.mozilla/
+/.cache/*
+/.config/Signal/
+/.config/TelegramDesktoprc
+/.local/share/Steam/
+/.local/share/TelegramDesktop
+/.btsync/

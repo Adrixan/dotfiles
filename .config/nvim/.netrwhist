@@ -1,0 +1,11 @@
+let g:netrw_dirhistmax  =10
+let g:netrw_dirhistcnt =9
+let g:netrw_dirhist_9='/home/Adrixan/.pki/nssdb'
+let g:netrw_dirhist_8='/home/Adrixan/.pki'
+let g:netrw_dirhist_7='/home/Adrixan/.pdf-over'
+let g:netrw_dirhist_6='/home/Adrixan/bin/GBML'
+let g:netrw_dirhist_5='/home/Adrixan/.cheat'
+let g:netrw_dirhist_4='/home/Adrixan/.kde4'
+let g:netrw_dirhist_3='/home/Adrixan/.oh-my-zsh'
+let g:netrw_dirhist_2='/home/Adrixan/.pcloud'
+let g:netrw_dirhist_1='/home/Adrixan/.pki'

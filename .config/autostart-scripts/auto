@@ -1,0 +1,11 @@
+#! /bin/bash
+#sudo killall wpa_supplicant ;
+#sudo /usr/sbin/wpa_supplicant -Dwext -iwlan0 -c/etc/wpa_supplicant/wpa_supplicant.conf -B ;
+#xmodmap /home/Adrixan/.xmodmaprc ;
+#xsudo /usr/sbin/wpa_gui ;
+#sudo hciconfig hci0 down;
+#synclient TapButton1=1 TapButton2=3 TapButton3=2;
+#/usr/bin/qinternet;
+#/usr/bin/owncloud;
+/usr/bin/rslsync --config /home/Adrixan/.btsync/sync.conf;
+#redshift;

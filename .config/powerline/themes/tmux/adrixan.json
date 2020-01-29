@@ -1,0 +1,39 @@
+{
+	"segments": {
+		"right": [
+			{
+				"function": "powerline.segments.common.sys.cpu_load_percent",
+				"name": "CPU Load"
+			},
+			{
+				"function": "powerline.segments.common.sys.system_load"
+			},
+			{
+				"function": "powerline.segments.common.time.date"
+			},
+			{
+				"function": "powerline.segments.common.time.date",
+				"name": "time",
+				"args": {
+					"format": "%H:%M",
+					"istime": true
+				}
+			},
+			{
+				"function": "powerline.segments.common.net.hostname"
+			},
+			{
+				"function": "powerline.segments.common.net.network_load"
+			},
+			{
+			"function": "powerline.segments.common.wthr.weather",
+    			"name": "weather",
+    			"priority": 50,
+    			"args": {
+        			"unit": "C",
+        			"location_query": "graz, austria"
+    			}
+			}
+		]
+	}
+}
