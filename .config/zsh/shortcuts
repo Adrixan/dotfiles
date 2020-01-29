@@ -1,0 +1,15 @@
+#create and change into directory
+ccd() {
+    mkdir -p -- "$1" &&
+	cd -- "$1"
+}
+
+# Git add all and push
+function gacpp() {
+    git add -A
+    git commit -m "$*"
+    git pull
+    git push
+}
+
+

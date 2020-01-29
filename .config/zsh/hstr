@@ -1,0 +1,4 @@
+# hstr config
+export HISTFILE=~/.zsh_history
+export HSTR_CONFIG=hicolor
+
