@@ -4,3 +4,4 @@
 .mutt/accounts/*
 .msmtprc
 .config/vdirsyncer/config
+.newsboat/config
