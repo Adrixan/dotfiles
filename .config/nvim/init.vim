@@ -25,6 +25,7 @@ Plugin 'airblade/vim-gitgutter'
 Plugin 'vimwiki/vimwiki'
 Plugin 'frazrepo/vim-rainbow'
 Plugin 'preservim/nerdtree'
+Plugin 'mcchrish/nnn.vim'
 " All of your Plugins must be added before the following line
 call vundle#end()
 filetype plugin indent on  " allows auto-indenting depending on file type
@@ -40,5 +41,5 @@ let g:lightline = {
       \ },
       \ }
 map <C-n> :NERDTreeToggle<CR>
-autocmd vimenter * NERDTree
+" autocmd vimenter * NERDTree
 
