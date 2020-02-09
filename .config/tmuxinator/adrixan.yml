@@ -54,3 +54,5 @@ windows:
       panes:
         - while true; do curl wttr.in/Graz ; sleep 6000; done
         - while true; do curl wttr.in/Moon ; sleep 6000; done
+  - cheats:
+      less ~/.config/cheats/tmux
