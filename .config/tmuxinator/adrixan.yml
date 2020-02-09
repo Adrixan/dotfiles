@@ -49,11 +49,12 @@ windows:
        - podboat
   - twitter:
       rainbowstream -iot
-  - weather:
-      layout: even-vertical
+  - info:
+      layout: tile
       panes:
         - while true; do curl wttr.in/Graz ; sleep 6000; done
         - while true; do curl wttr.in/Moon ; sleep 6000; done
+        - while true; do khal calendar ; sleep 6000; done
   - filemanager:
       mc
   - cheats:
