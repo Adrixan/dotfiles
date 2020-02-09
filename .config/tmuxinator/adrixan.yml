@@ -6,8 +6,8 @@ root: ~/
 # Optional tmux socket
 # socket_name: foo
 
-# Runs before everything. Use it to start daemons etc.
-# pre: sudo /etc/rc.d/mysqld start
+# Note that the pre and post options have been deprecated and will be replaced by
+# project hooks.
 
 # Project hooks
 # Runs on project start, always
@@ -39,26 +39,18 @@ root: ~/
 # Controls whether the tmux session should be attached to automatically. Defaults to true.
 # attach: false
 
-# Runs after everything. Use it to attach to tmux with custom options etc.
-# post: tmux -CC attach -t adrixan
-
 windows:
-#  - editor:
-#      layout: main-vertical
-      # Synchronize all panes of this window, can be enabled before or after the pane commands run.
-      # 'before' represents legacy functionality and will be deprecated in a future release, in favour of 'after'
-      # synchronize: after
-#      panes:
-#        - vim
-#        - guard
-#  - server: bundle exec rails s
-#  - logs: tail -f log/development.log
-#  - filemanager:
-#    - ranger
-  - shell:
-    - zsh
-  - stats:
+  - mail:
+      neomutt
+  - rss:
       layout: main-vertical
       panes:
-        - htop
-        - bmon
+       - newsboat
+       - podboat
+  - twitter:
+      rainbowstream -iot
+  - weather:
+      layout: even-vertical
+      panes:
+        - while true; do curl wttr.in/Graz ; sleep 6000; done
+        - while true; do curl wttr.in/Moon ; sleep 6000; done
