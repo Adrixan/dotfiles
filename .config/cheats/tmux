@@ -100,3 +100,26 @@ Managing split panes
 
         C-a x          kill the current pane
         C-a q          display pane numbers for a short while
+
+Copy Mode
+
+    C-b + [                 Enter copy mode
+    C-b + PgUp              Enter copy mode and scroll one page up
+    q                       Quit Copy mode
+    h,j,k,l                 Move cursor left, down, up, right
+    /                       Search forward
+    ?                       Search backward
+    n                       Next keyword occurence
+    N                       Previous keyword occurence
+    Spacebar                Start selection
+    Esc                     Clear selection
+    Enter                   Copy selection
+    C-b + ]                 Paste contents of buffer_0
+
+For the following first C-b
+    : show-buffer           display buffer_0 contents
+    : capture-pane          copy entire visible contents of pane to a buffer
+    : list buffers          Show all buffers
+    : choose-buffer         Show all buffers and paste selected
+    : safe-buffer a.txt     Save buffer contents to buf.txt
+    : delete-buffer -b 1    delete buffer one
