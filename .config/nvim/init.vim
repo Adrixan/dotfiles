@@ -43,3 +43,10 @@ let g:lightline = {
 map <C-n> :NERDTreeToggle<CR>
 " autocmd vimenter * NERDTree
 
+" for vimwiki
+set nocompatible
+filetype plugin on
+syntax on
+
+let g:vimwiki_list = [{'path': '~/Documents/vimwiki/',
+                      \ 'syntax': 'markdown', 'ext': '.md'}]
