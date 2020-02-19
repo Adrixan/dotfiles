@@ -10,3 +10,6 @@
 [submodule ".config/oh-my-zsh-modules/autoupdate"]
 	path = .config/oh-my-zsh-modules/autoupdate
 	url = https://github.com/TamCore/autoupdate-oh-my-zsh-plugins.git
+[submodule ".config/cheats/cheatsheets"]
+	path = .config/cheats/cheatsheets
+	url = https://github.com/cheat/cheatsheets.git
