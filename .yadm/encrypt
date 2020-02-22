@@ -1,6 +1,6 @@
 .ssh/id_rsa*
 .btsync/sync.conf
-.offlineimaprc
+.offlineimaprc##*
 .mutt/accounts/*
 .msmtprc
 .config/vdirsyncer/config
