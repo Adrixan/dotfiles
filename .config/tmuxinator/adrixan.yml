@@ -56,9 +56,7 @@ windows:
         - while true; do clear; curl wttr.in/Moon ; sleep 6000; done
         - khal interactive
   - irssi:
-      layout: 6c47,179x47,0,0{158x47,0,0,4,20x47,159,0,9}
       panes:
         - irssi
-        - cat ~/.irssi/nicklistfifo
   - terminal:
       
