@@ -5,4 +5,4 @@
 .msmtprc
 .config/vdirsyncer/config
 .newsboat/config
-.irssi/config
+.irssi/config*
