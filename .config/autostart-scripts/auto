@@ -7,5 +7,5 @@
 #synclient TapButton1=1 TapButton2=3 TapButton3=2;
 #/usr/bin/qinternet;
 #/usr/bin/owncloud;
-/usr/bin/rslsync --config /home/Adrixan/.btsync/sync.conf;
+#/usr/bin/rslsync --config /home/Adrixan/.btsync/sync.conf;
 #redshift;
