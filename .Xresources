@@ -1,3 +1,62 @@
-URxvt.perl-ext-common:      solarized
+!---------------------------------
+! Xft settings
+! --------------------------------
+!Xft.dpi:        110
+Xft.dpi:        109
+Xft.antialias:  true
+Xft.rgba:       rgb
+Xft.hinting:    true
+Xft.hintstyle:  hintslight
+Xft.autohint:   false
+Xft.lcdfilter:  lcddefault
+
+!---------------------------------
+! URXVT Terminal config
+! --------------------------------
+URxvt.depth:                            32
+URxvt*termName:                         screen-256color
+URxvt*geometry:                         240x84
+URxvt.loginShell:                       true
+URxvt*scrollColor:                      #777777
+URxvt.scrollStyle:                      rxvt
+URxvt*scrollTtyKeypress:        true
+URxvt*scrollTtyOutput:          false
+URxvt*scrollWithBuffer:         true
+URxvt*skipScroll:                       true
+URxvt*scrollBar:                        false
+URxvt*fading:                           30
+URxvt*urgentOnBell:                     false
+URxvt*visualBell:                       true
+URxvt*mapAlert:                         true
+URxvt*mouseWheelScrollPage:     true
+URxvt.foreground:                       #eeeeee
+URxvt.background:                       #000000
+URxvt*colorUL:                          yellow
+URxvt*underlineColor:           yellow
+URxvt.saveLines:                        65535
+URxvt.cursorBlink:                      false
+URxvt.utf8:                             true
+URxvt.locale:                           true
+
+URxvt.letterSpace:              -1
+
+URxvt.font:             xft:sourcecodepro:pixelsize=12:style=mono
+URxvt.boldFont:         xft:sourcecodepro:pixelsize=12:style=bold
+
+! Perl extensions
+URxvt.perl-ext-common:     default,matcher,solarized,font-size
+URxvt.matcher.button:      1
+URxvt.urlLauncher:         firefox
+
+URxvt.keysym.C-Up:              perl:font-size:increase
+URxvt.keysym.C-Down:            perl:font-size:decrease
+URxvt.keysym.C-S-Up:            perl:font-size:incglobal
+URxvt.keysym.C-S-Down:          perl:font-size:decglobal
+
+URxvt.keysym.Home: \033[1~
+URxvt.keysym.End: \033[4~
+URxvt.keysym.KP_Home: \033[1~
+URxvt.keysym.KP_End:  \033[4~
+
 URxvt.keysym.Mod4-c:        perl:solarized:toggle
 URxvt.solarized.default:    dark
