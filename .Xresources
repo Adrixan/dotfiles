@@ -1,0 +1,3 @@
+URxvt.perl-ext-common:      solarized
+URxvt.keysym.Mod4-c:        perl:solarized:toggle
+URxvt.solarized.default:    dark
