@@ -30,7 +30,7 @@ font sourcecodepro:monospace 8
 floating_modifier $mod
 
 # start a terminal
-bindsym $mod+Return exec i3-sensible-terminal
+bindsym $mod+Return exec konsole
 
 # kill focused window
 bindsym $mod+Shift+q kill
@@ -163,19 +163,17 @@ mode "resize" {
 
 bindsym $mod+r mode "resize"
 
-set $Locker i3lock && sleep 1
-
-mode "exit: [l]ogout, [r]eboot, [s]hutdown" {
-  bindsym l exec $Locker lock
+mode "exit: [l]ock, [e]xit, [h]ibernate [r]eboot, [s]hutdown" {
+  bindsym l exec i3lock 
   bindsym e exec i3-msg exit
-  bindsym h exec $Locker && systemctk hibernate
+  bindsym h exec i3lock && systemctl hibernate
   bindsym r exec systemctl reboot
   bindsym s exec systemctl shutdown
   bindsym Escape mode "default"
   bindsym Return mode "default"
 }
 
-bindsym $mod+x mode "exit: [l]ogout, [r]eboot, [s]hutdown"
+bindsym $mod+x mode "exit: [l]ock, [e]xit, [h]ibernate [r]eboot, [s]hutdown"
 
 exec --no-startup-id flameshot
 bindsym Print exec "flameshot gui"
