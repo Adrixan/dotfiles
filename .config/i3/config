@@ -178,12 +178,13 @@ bindsym $mod+x mode "exit: [l]ock, [e]xit, [h]ibernate [r]eboot, [s]hutdown"
 exec --no-startup-id flameshot
 bindsym Print exec "flameshot gui"
 
-exec --no-startup-id nm-applet
+exec --no-startup-id nm-tray
 exec --no-startup-id dunst
 exec --no-startup-id blueman-applet
 
-exec "setxkbmap -layout us,de"
+exec "setxkbmap -layout de,us"
 exec "setxkbmap -option 'grp:alt_shift_toggle'"
+exec "/home/pi/bin/no-hdmi-off.sh"
 
 # Pulse Audio controls
 bindsym XF86AudioRaiseVolume exec --no-startup-id pactl set-sink-volume 0 +5% #increase sound volume
