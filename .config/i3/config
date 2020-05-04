@@ -181,6 +181,7 @@ bindsym Print exec "flameshot gui"
 exec --no-startup-id nm-tray
 exec --no-startup-id dunst
 exec --no-startup-id blueman-applet
+exec --no-startup-id clipit
 
 exec "setxkbmap -layout de,us"
 exec "setxkbmap -option 'grp:alt_shift_toggle'"
