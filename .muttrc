@@ -84,6 +84,9 @@ auto_view text/html
 # when composing emails, use this command to get addresses from
 # the addressbook with khard first, and everything else from mu index
 set query_command = "( khard email --parsable '%s' | sed -n '1!p'; mu cfind --format=mutt-ab '%s' )"
+set query_command = "echo %s | xargs khard email --parsable --"
+bind editor <Tab> complete-query
+bind editor ^T    complete
 
 # sidebar patch config
 set sidebar_visible
