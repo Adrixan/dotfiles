@@ -8,6 +8,7 @@ alias du="my_warning; echo 'Run ncdu instead' ; warning_delay; du"
 alias hh=hstr
 alias exa="exa --color=always -lh"
 alias please="sudo"
+alias :wiki='nvim +:VimwikiIndex'
 alias :e='nvim'
 alias l='exa -la --git'
 alias tailf='tail -f'
