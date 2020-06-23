@@ -1,2 +1,2 @@
-*/15 * * * * offlineimap >/dev/null 2>&1
-*/15 * * * * vdirsyncer sync >/dev/null 2>&1
+*/15 * * * * /usr/local/bin/offlineimap >/dev/null 2>&1
+*/15 * * * * /usr/local/bin/vdirsyncer sync >/dev/null 2>&1
