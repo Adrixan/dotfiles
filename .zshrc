@@ -4,3 +4,4 @@ source ~/.config/zsh/hints
 source ~/.config/zsh/shortcuts
 source ~/.config/zsh/hstr
 source ~/.config/zsh/aliases
+source ~/.config/zsh/env
