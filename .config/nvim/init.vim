@@ -35,6 +35,9 @@ Plugin 'preservim/nerdcommenter'
 Plugin 'Shougo/deoplete.nvim'
 Plugin 'christoomey/vim-tmux-navigator'
 Plugin 'zchee/deoplete-jedi'
+Plugin 'vim-utils/vim-man'
+Plugin 'mbbill/undotree'
+Plugin 'sheerun/vim-polyglot'
 " All of your Plugins must be added before the following line
 call vundle#end()
 
@@ -85,4 +88,5 @@ let g:nerdtree_tabs_focus_on_files=1
 let g:NERDTreeMapOpenInTabSilent = '<RightMouse>'
 set wildignore+=*/tmp/*,*.so,*.swp,*.zip,*.pyc,*.db,*.sqlite
 
-
+" Hit F5 to open Undotree
+nnoremap <F5> :UndotreeToggle<cr>
