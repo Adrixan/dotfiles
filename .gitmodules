@@ -16,3 +16,6 @@
 [submodule ".config/zsh/themes/powerlevel9k"]
 	path = .config/zsh/themes/powerlevel9k
 	url = https://github.com/Powerlevel9k/powerlevel9k.git
+[submodule ".tmux/plugins/tpm"]
+	path = .tmux/plugins/tpm
+	url = https://github.com/tmux-plugins/tpm
