@@ -38,6 +38,7 @@ Plugin 'zchee/deoplete-jedi'
 Plugin 'vim-utils/vim-man'
 Plugin 'mbbill/undotree'
 Plugin 'sheerun/vim-polyglot'
+Plugin 'ycm-core/YouCompleteMe'
 " All of your Plugins must be added before the following line
 call vundle#end()
 
