@@ -4,12 +4,6 @@
 [submodule ".config/nvim/bundle/Vundle.vim"]
 	path = .config/nvim/bundle/Vundle.vim
 	url = https://github.com/VundleVim/Vundle.vim
-[submodule ".config/oh-my-zsh-modules/you-should-use"]
-	path = .config/oh-my-zsh-modules/you-should-use
-	url = https://github.com/MichaelAquilina/zsh-you-should-use.git
-[submodule ".config/oh-my-zsh-modules/autoupdate"]
-	path = .config/oh-my-zsh-modules/autoupdate
-	url = https://github.com/TamCore/autoupdate-oh-my-zsh-plugins.git
 [submodule ".config/cheats/cheatsheets"]
 	path = .config/cheats/cheatsheets
 	url = https://github.com/cheat/cheatsheets.git
