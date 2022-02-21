@@ -40,6 +40,7 @@ Plugin 'christoomey/vim-tmux-navigator'
 " Plugin 'sheerun/vim-polyglot'
 " Plugin 'ycm-core/YouCompleteMe'
 " All of your Plugins must be added before the following line
+Plugin 'dracula/vim', { 'name': 'dracula' }
 call vundle#end()
 
 syntax enable
@@ -58,7 +59,7 @@ let g:lightline = {
       \ }
 " map <C-n> :NERDTreeToggle<CR>
 " autocmd vimenter * NERDTree
-
+colorscheme dracula
 " for vimwiki
 set nocompatible
 filetype plugin on
