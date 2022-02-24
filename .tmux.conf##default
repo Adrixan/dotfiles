@@ -1,4 +1,6 @@
 setw -g mode-keys vi
+set -g @plugin 'dracula/tmux'
+
 run-shell "/usr/bin/powerline-daemon -q"
 source /usr/share/tmux/powerline.conf
 
