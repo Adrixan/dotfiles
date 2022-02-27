@@ -1,6 +1,8 @@
 # Use the tpm install command: prefix + I (default prefix is ctrl+b)
 setw -g mode-keys vi
 set -g @plugin 'dracula/tmux'
+set -g @plugin 'tmux-plugins/tmux-resurrect'
+set -g @plugin 'tmux-plugins/tmux-yank'
 
 set -g @dracula-plugins "cpu-usage ram-usage battery network weather time"
 

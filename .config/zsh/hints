@@ -1,5 +1,5 @@
 echo "Use progress to track cp/mv/etc."
-echo "Remember tmuxinator for tmux profiles"
+echo "Remember tmuxp for tmux profiles"
 echo "You can use bro or cheat instead of man"
 echo "Use manly for help with specific arguments"
 echo "Use hstr (hh) for command history access"
