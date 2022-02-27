@@ -1,8 +1,20 @@
+# Use the tpm install command: prefix + I (default prefix is ctrl+b)
 setw -g mode-keys vi
 set -g @plugin 'dracula/tmux'
 
-run-shell "/usr/bin/powerline-daemon -q"
-source /usr/share/tmux/powerline.conf
+set -g @dracula-plugins "cpu-usage ram-usage battery network weather time"
+
+set -g @dracula-cpu-display-load true
+
+set -g @dracula-day-month true
+set -g @dracula-military-time true
+
+set -g @dracula-show-fahrenheit false
+
+#run-shell "/usr/bin/powerline-daemon -q"
+#source /usr/share/tmux/powerline.conf
 
 # Initialize TMUX plugin manager (keep this line at the very bottom of tmux.conf)
 run '~/.tmux/plugins/tpm/tpm'
+
+
