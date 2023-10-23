@@ -1,7 +1,6 @@
 alias my_warning="tput setab 1; tput setaf 0;"
 alias warning_delay="sleep 5"
 alias grep="my_warning; echo 'Run rg instead'; warning_delay; grep"
-alias ls="my_warning; echo 'Run exa instead'; warning_delay; ls"
 alias ping="my_warning; echo 'Run mtr or noping instead' ; warning_delay; ping"
 alias nslookup="my_warning; echo 'Run dig +short instead' ; warning_delay; nslookup"
 alias du="my_warning; echo 'Run ncdu instead' ; warning_delay; du"
@@ -15,3 +14,4 @@ alias tailf='tail -f'
 alias zdup='sudo zypper dup'
 alias rm='rm -vI'
 alias a2d='aria2c -x3'
+alias sysup='sudo zypper ref --force; sudo zypper dup'
