@@ -1,9 +1,6 @@
 [submodule ".config/nvim/bundle/Vundle.vim"]
 	path = .config/nvim/bundle/Vundle.vim
 	url = https://github.com/VundleVim/Vundle.vim
-[submodule ".tmux/plugins/tpm"]
-	path = .tmux/plugins/tpm
-	url = https://github.com/tmux-plugins/tpm
 [submodule ".addon-repos/dracula-zsh"]
 	path = .addon-repos/dracula-zsh
 	url = https://github.com/dracula/zsh.git
