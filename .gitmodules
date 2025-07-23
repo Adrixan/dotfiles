@@ -1,12 +1,6 @@
 [submodule ".config/nvim/bundle/Vundle.vim"]
 	path = .config/nvim/bundle/Vundle.vim
 	url = https://github.com/VundleVim/Vundle.vim
-[submodule ".config/cheats/cheatsheets"]
-	path = .config/cheats/cheatsheets
-	url = https://github.com/cheat/cheatsheets.git
-[submodule ".config/zsh/themes/powerlevel9k"]
-	path = .config/zsh/themes/powerlevel9k
-	url = https://github.com/Powerlevel9k/powerlevel9k.git
 [submodule ".tmux/plugins/tpm"]
 	path = .tmux/plugins/tpm
 	url = https://github.com/tmux-plugins/tpm
