@@ -2,3 +2,5 @@ alias :e='nvim'
 alias rm='rm -vI'
 alias a2d='aria2c -x3'
 alias sysup='sudo zypper ref --force; sudo zypper dup'
+
+c() { printf "%s\n" "$@" | bc -l; }
