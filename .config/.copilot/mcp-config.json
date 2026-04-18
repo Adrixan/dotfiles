@@ -10,8 +10,11 @@
                 "--from",
                 "git+https://github.com/oraios/serena",
                 "serena",
-                "config",
-                "editor"
+                "start-mcp-server",
+                "--context",
+                "ide-assistant",
+                "--project",
+                "${pwd}"
             ]
         }
     }
