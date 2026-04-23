@@ -19,6 +19,8 @@ set nobackup
 set noswapfile
 set nowrap
 set termguicolors   " Enable true colors support
+set wrap
+set linebreak
 
 " set the runtime path to include Vundle and initialize
 set rtp+=~/.config/nvim/bundle/Vundle.vim
