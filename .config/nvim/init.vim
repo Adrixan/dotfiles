@@ -17,7 +17,6 @@ set incsearch
 set smartcase
 set nobackup
 set noswapfile
-set nowrap
 set termguicolors   " Enable true colors support
 set wrap
 set linebreak
@@ -39,7 +38,7 @@ syntax enable
 filetype plugin indent on  " allows auto-indenting depending on file type
 let g:rainbow_active = 1
 let g:lightline = {
-      \ 'colorscheme': 'wombat',
+      \ 'colorscheme': 'dracula',
       \ 'active': {
       \   'left': [ [ 'mode', 'paste' ],
       \             [ 'readonly', 'filename', 'modified', 'charvaluehex' ] ]
@@ -50,3 +49,4 @@ let g:lightline = {
       \ }
 colorscheme dracula
 
+let g:zypper_install_markdown_parsers = 0
