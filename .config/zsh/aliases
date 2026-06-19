@@ -4,3 +4,49 @@ alias a2d='aria2c -x3'
 alias sysup='sudo zypper ref --force; sudo zypper dup'
 
 c() { printf "%s\n" "$@" | bc -l; }
+
+yt2mp3() {
+    if [ "$#" -lt 3 ]; then
+        echo "Usage: yt2mp3 <URL> \"Artist\" \"Title\" [start_time] [end_time]"
+        echo "Format for times: HH:MM:SS or SS"
+        echo "Example: yt2mp3 https://youtu.be/... \"Artist\" \"Title\" 00:01:10 00:02:30"
+        return 1
+    fi
+
+    local url="$1"
+    local artist="$2"
+    local title="$3"
+    local start_time="${4:-}"
+    local end_time="${5:-}"
+
+    # Base yt-dlp arguments for audio extraction and metadata injection
+    local cmd=(
+        yt-dlp -x --audio-format mp3
+        --metadata-from-title "%(dummy)s"
+        --parse-metadata "$artist:%(artist)s"
+        --parse-metadata "$title:%(title)s"
+        --embed-metadata
+    )
+
+    # Handle timing arguments via ffmpeg stream selection
+    if [ -n "$start_time" ] || [ -n "$end_time" ]; then
+        cmd+=( --external-downloader ffmpeg )
+        
+        local ff_args=""
+        # -ss specifies start time relative to the beginning of the input
+        if [ -n "$start_time" ]; then
+            ff_args+="ffmpeg_i:-ss $start_time "
+        fi
+        # -to specifies stop time relative to the beginning of the input
+        if [ -n "$end_time" ]; then
+            ff_args+="ffmpeg_i:-to $end_time"
+        fi
+
+        cmd+=( --external-downloader-args "$ff_args" )
+    fi
+
+    # Append target URL and execute array safely
+    cmd+=("$url")
+    "${cmd[@]}"
+}
+
