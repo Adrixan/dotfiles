@@ -2,15 +2,15 @@
 	email = peter@code-alongsi.de
     name = Peter Aufner
 
-[core]
-    pager = delta
-
-[interactive]
-    diffFilter = delta --color-only
-
 [delta]
     navigate = true  # use n and N to move between diff sections
     light = false    # set to true if you're in a terminal w/ a light background color (e.g. the default macOS terminal)
+
+[core]
+    pager = "if command -v delta >/dev/null 2>&1; then delta; else less -RF; fi"
+
+[interactive]
+    diffFilter = "if command -v delta >/dev/null 2>&1; then delta --color-only; else cat; fi"
 
 [merge]
     conflictstyle = diff3
