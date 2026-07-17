@@ -2,6 +2,7 @@ alias :e='nvim'
 alias rm='rm -vI'
 alias a2d='aria2c -x3'
 alias sysup='sudo zypper ref --force; sudo zypper dup'
+alias topup='topgrade -y -c --no-retry'
 
 c() { printf "%s\n" "$@" | bc -l; }
 
