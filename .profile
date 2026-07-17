@@ -23,3 +23,15 @@ test -z "$PROFILEREAD" && . /etc/profile || true
 #    /usr/bin/fortune
 #    echo
 #fi
+
+
+# Added by Toolbox App
+export PATH="$PATH:/home/Adrixan/.local/share/JetBrains/Toolbox/scripts"
+
+. "$HOME/.cargo/env"
+
+
+# Added by Antigravity CLI installer
+export PATH="/home/Adrixan/.local/bin:$PATH"
+
+. "$HOME/.local/share/../bin/env"
