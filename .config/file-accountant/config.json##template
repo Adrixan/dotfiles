@@ -1,0 +1,18 @@
+{
+{% if env.TERMUX_VERSION != "" %}
+  "data_dir": "~/storage/shared/sync/file-accountant/",
+{% else %}
+  "data_dir": "~/sync/file-accountant/",
+{% endif %}
+  "predefined_tacts": [
+    10,
+    20
+  ],
+  "default_hourly_rates": {
+    "Consulting": 150.0,
+    "Development": 120.0,
+    "Default": 100.0
+  },
+  "default_tax_rate": 20.0,
+  "tax_rates": {}
+}
