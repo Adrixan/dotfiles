@@ -1,0 +1,79 @@
+# Global Git Ignore & AI Harness Exclusions
+
+# General Scratch
+.scratch/
+
+# AI Environment Secrets (Ansible managed)
+.config/ai/env
+
+# Claude Code CLI Local State & History
+**/.claude/settings.local.json
+.claude/history.jsonl
+.claude/sessions/
+.claude/session-env/
+.claude/projects/
+.claude/plans/
+.claude/backups/
+.claude/cache/
+.claude/paste-cache/
+.claude/shell-snapshots/
+.claude/state/
+.claude/.credentials.json
+.claude/plugins/
+.claude/skills/synced/
+.claude.json
+.claude.json.backup.*
+.local/share/claude/
+.local/state/claude/
+
+# Claude Desktop GUI (Electron app)
+.config/Claude/
+
+# Gemini / Antigravity CLI Local State
+.gemini/antigravity-cli/brain/
+.gemini/antigravity-cli/conversations/
+.gemini/antigravity-cli/conversation_summaries.db*
+.gemini/antigravity-cli/crashes/
+.gemini/antigravity-cli/log/
+.gemini/antigravity-cli/cache/
+.gemini/antigravity-cli/history.jsonl
+.gemini/antigravity-cli/plugin_data/
+.gemini/antigravity-cli/presence/
+.gemini/antigravity-cli/updater/
+.gemini/antigravity-cli/skills/
+.gemini/antigravity-cli/scratch/
+.gemini/antigravity-cli/antigravity-oauth-token
+.gemini/antigravity-cli/agyhub_summaries_proto.pb
+.gemini/antigravity-cli/jetbox_summaries_proto.pb
+.gemini/antigravity-cli/antigravity_state.pbtxt
+.gemini/antigravity-cli/jetski_state.pbtxt
+.gemini/antigravity-cli/cli.log
+.gemini/antigravity-cli/last_check.timestamp
+.gemini/antigravity-cli/annotations/
+.gemini/antigravity-cli/implicit/
+.gemini/antigravity-cli/knowledge/
+.gemini/antigravity-backup/
+.gemini/tmp/
+.gemini/history/
+.gemini/oauth_creds.json
+.gemini/installation_id
+.gemini/google_accounts.json
+.gemini/state.json
+.gemini/projects.json
+.gemini/trustedFolders.json
+.gemini/skills/synced
+.gemini/antigravity-cli/settings.json
+
+# OpenCode CLI Local State
+.config/opencode/opencode.json.bak.*
+.config/opencode/node_modules/
+.config/opencode/skills/synced
+.local/share/opencode/
+.local/state/opencode/
+
+# Shared Skills Dynamic Cloud Cache
+.local/share/skills/synced/
+.local/share/skills/synced
+
+# Bailian (private key & telemetry)
+.bailian/

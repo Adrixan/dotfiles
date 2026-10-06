@@ -35,3 +35,4 @@ export PATH="$PATH:/home/Adrixan/.local/share/JetBrains/Toolbox/scripts"
 export PATH="/home/Adrixan/.local/bin:$PATH"
 
 . "$HOME/.local/share/../bin/env"
+

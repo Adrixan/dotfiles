@@ -1,0 +1,3 @@
+[submodule ".local/share/skills/ELI5"]
+	path = .local/share/skills/ELI5
+	url = https://github.com/DreambigOu/ELI5.git

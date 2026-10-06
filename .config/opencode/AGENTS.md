@@ -1,0 +1,1 @@
+/home/Adrixan/.config/ai/AGENTS.md

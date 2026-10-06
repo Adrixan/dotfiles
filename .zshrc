@@ -23,3 +23,7 @@ export PATH=/home/Adrixan/.opencode/bin:$PATH
 
 # Added by Antigravity CLI installer
 export PATH="/home/Adrixan/.local/bin:$PATH"
+
+# Ph.D. research stack (2026-09-02)
+[ -f ~/.research_stack.env ] && . ~/.research_stack.env
+[ -f "$HOME/.config/ai/env" ] && source "$HOME/.config/ai/env"
