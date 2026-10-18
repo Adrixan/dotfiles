@@ -4,19 +4,6 @@
     "@frankhommers/opencode-yolo"
   ],
   "provider": {
-    "nowcoding": {
-      "name": "NowCoding Marketplace",
-      "package": "@opencode-ai/ai/providers/openai-compatible",
-      "options": {
-        "baseURL": "https://nowcoding.ai/v1",
-        "apiKey": "{{ env.NOWCODING_API_KEY }}"
-      },
-      "models": {
-        "gpt-5.6-sol": { "modelID": "gpt-5.6-sol", "name": "GPT-5.6 Sol", "limit": { "context": 1050000, "output": 128000 } },
-        "claude-opus-5": { "modelID": "claude-opus-5", "name": "Claude Opus 5", "limit": { "context": 1000000, "output": 128000 } },
-        "claude-sonnet-5": { "modelID": "claude-sonnet-5", "name": "Claude Sonnet 5", "limit": { "context": 1000000, "output": 128000 } }
-      }
-    },
     "anthropic": {
       "options": {
         "headers": {
