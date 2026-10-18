@@ -2,6 +2,7 @@
   "permissions": {
     "defaultMode": "auto"
   },
+  "model": "sonnet",
   "skillOverrides": {
     "bailian-cli": "off",
     "bailian-docs-llm-wiki": "off",
@@ -13,8 +14,15 @@
     "bailian-train-deploy": "off",
     "bailian-web-search": "off"
   },
+  "enableWorkflows": true,
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": true
+  },
   "modelSettings": {
     "claude-opus-5-5": {
+      "effortLevel": "high"
+    },
+    "claude-sonnet-5-5": {
       "effortLevel": "high"
     }
   },
