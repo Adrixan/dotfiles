@@ -1,8 +1,17 @@
 {
   "permissions": {
-    "defaultMode": "auto"
+    "defaultMode": "auto",
+    "ask": [
+      "mcp__plugin_workstation-mcp_nextcloud__nc_mail_send_message",
+      "mcp__plugin_workstation-mcp_nextcloud__talk_send_message",
+      "mcp__plugin_workstation-mcp_nextcloud__nc_calendar_create_meeting",
+      "mcp__plugin_workstation-mcp_nextcloud__nc_share_create*",
+      "mcp__plugin_workstation-mcp_nextcloud__*delete*",
+      "mcp__plugin_workstation-mcp_nextcloud__*trash*",
+      "mcp__plugin_workstation-mcp_github__merge_pull_request",
+      "mcp__plugin_workstation-mcp_github__*delete*"
+    ]
   },
-  "model": "sonnet",
   "skillOverrides": {
     "bailian-cli": "off",
     "bailian-docs-llm-wiki": "off",
@@ -16,7 +25,16 @@
   },
   "enableWorkflows": true,
   "enabledPlugins": {
-    "frontend-design@claude-plugins-official": true
+    "frontend-design@claude-plugins-official": true,
+    "workstation-mcp@workstation": true
+  },
+  "extraKnownMarketplaces": {
+    "workstation": {
+      "source": {
+        "source": "directory",
+        "path": "/home/Adrixan/.config/ai/claude-plugins"
+      }
+    }
   },
   "modelSettings": {
     "claude-opus-5-5": {

@@ -77,3 +77,9 @@
 
 # Bailian (private key & telemetry)
 .bailian/
+
+# Playwright MCP page snapshots
+.playwright-mcp/
+
+# Serena per-project index and memories
+.serena/

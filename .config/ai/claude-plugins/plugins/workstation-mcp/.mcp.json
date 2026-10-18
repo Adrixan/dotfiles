@@ -1,0 +1,64 @@
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"
+      }
+    },
+    "playwright": {
+      "command": "/usr/local/bin/playwright-mcp",
+      "args": [
+        "--executable-path", "/usr/bin/chromium",
+        "--headless",
+        "--isolated",
+        "--output-dir", "${HOME}/.cache/playwright-mcp"
+      ]
+    },
+    "memory": {
+      "command": "/usr/local/bin/mcp-server-memory",
+      "env": {
+        "MEMORY_FILE_PATH": "${HOME}/sync/ai/mcp-memory.jsonl"
+      }
+    },
+    "fetch": {
+      "command": "${HOME}/.local/bin/mcp-server-fetch"
+    },
+    "git": {
+      "command": "${HOME}/.local/bin/mcp-server-git"
+    },
+    "arxiv": {
+      "command": "${HOME}/.local/bin/arxiv-mcp-server",
+      "args": ["--storage-path", "${HOME}/Obsidian/Ph.D./Papers/arxiv"]
+    },
+    "zotero": {
+      "command": "${HOME}/.local/bin/zotero-mcp",
+      "env": {
+        "ZOTERO_LOCAL": "true"
+      }
+    },
+    "markitdown": {
+      "command": "${HOME}/.local/bin/markitdown-mcp"
+    },
+    "serena": {
+      "command": "${HOME}/.local/bin/serena",
+      "args": ["start-mcp-server", "--context", "claude-code", "--project-from-cwd", "--open-web-dashboard", "False"]
+    },
+    "nextcloud": {
+      "command": "${HOME}/.local/bin/nextcloud-mcp-server",
+      "args": ["run", "--transport", "stdio"],
+      "env": {
+        "NEXTCLOUD_HOST": "${NEXTCLOUD_HOST}",
+        "NEXTCLOUD_USERNAME": "${NEXTCLOUD_USERNAME}",
+        "NEXTCLOUD_PASSWORD": "${NEXTCLOUD_PASSWORD}"
+      }
+    },
+    "docker": {
+      "command": "${HOME}/.local/bin/mcp-server-docker",
+      "env": {
+        "DOCKER_HOST": "${MCP_DOCKER_HOST:-tcp://127.0.0.1:2375}"
+      }
+    }
+  }
+}
