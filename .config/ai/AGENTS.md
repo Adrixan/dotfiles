@@ -115,6 +115,6 @@ correctness_protocol:
   execution_loop: Follow DISCOVER (inspect state) -> DECIDE (validate security/scope) -> ACT (minimal targeted change) -> VERIFY (confirm outcome).
   completeness: Emit complete, runnable, production-grade code. Never truncate logic with placeholders or `# TODO` comments unless explicitly requested.
   defensive_design: Validate all inputs, sanitize external boundaries, handle errors explicitly, and respect openSUSE/Zsh/Docker conventions.
-auto_commit_and_push: After completing and verifying a change in a git repository, commit and push all related changes without asking. Use Conventional Commits. If on the default branch (`main`/`master`), create a feature branch first. Never commit secrets, never force-push, and stop and report if hooks, tests, or the push fail.
+auto_commit_and_push: After completing and verifying a change in a git repository, commit and push all related changes without asking. Use Conventional Commits. If on the default branch (`main`/`master`), create a feature branch first, push it, then merge it back automatically: update the default branch (`git pull --ff-only`), `git merge --no-ff` the feature branch, and push the default branch. Work done on an existing long-lived non-default branch (e.g. `laptops`) stays on that branch and is merged into the default branch only with explicit approval. Never commit secrets, never force-push, and stop and report if hooks, tests, the push, or the merge fail (run `git merge --abort` on conflicts).
 </code_and_engineering_discipline>
 </system_context>

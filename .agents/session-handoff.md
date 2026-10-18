@@ -24,3 +24,5 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 - Binaries, secrets file and template rendering come from `~/code/ansible-opensuse-server` role `ai_workstation` (`ansible-playbook main.yml -e enable_ai_workstation=true`).
 - New machine: `yadm clone`, then run the playbook (it renders templates with secrets and registers the Claude plugin). Never run `yadm` commands in a shell without `~/.config/ai/env` sourced: auto-alt renders blank secrets.
 - Pending: Nextcloud credentials, possibly lost NowCoding API key (see ansible repo handoff).
+- Rule change (2026-10-18): `auto_commit_and_push` in `~/.config/ai/AGENTS.md` now merges feature branches back into `main`/`master` automatically (`pull --ff-only`, `merge --no-ff`, push). Long-lived non-default branches (e.g. ansible `laptops`) are not merged without approval.
+- `feat/mcp-stack-overhaul` merged into yadm `master`.
