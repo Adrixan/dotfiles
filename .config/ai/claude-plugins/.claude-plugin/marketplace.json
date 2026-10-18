@@ -1,0 +1,14 @@
+{
+  "name": "workstation",
+  "description": "Personal workstation plugins, tracked in yadm (~/.config/ai/claude-plugins)",
+  "owner": {
+    "name": "Peter Aufner"
+  },
+  "plugins": [
+    {
+      "name": "workstation-mcp",
+      "source": "./plugins/workstation-mcp",
+      "description": "Unified MCP server set shared with Antigravity and OpenCode; binaries provisioned by the ansible ai_workstation role"
+    }
+  ]
+}

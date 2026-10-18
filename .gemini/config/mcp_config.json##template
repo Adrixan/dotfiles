@@ -1,67 +1,92 @@
 {
   "mcpServers": {
     "github": {
-      "command": "npx",
+      "serverUrl": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer {{ env.GITHUB_PERSONAL_ACCESS_TOKEN }}"
+      },
+      "disabled": false
+    },
+    "context7": {
+      "serverUrl": "https://mcp.context7.com/mcp",
+      "disabled": false
+    },
+    "playwright": {
+      "command": "/usr/local/bin/playwright-mcp",
       "args": [
-        "-y",
-        "@modelcontextprotocol/server-github"
+        "--executable-path",
+        "/usr/bin/chromium",
+        "--headless",
+        "--isolated",
+        "--output-dir",
+        "{{ env.HOME }}/.cache/playwright-mcp"
       ],
-      "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "{{ env.GITHUB_PERSONAL_ACCESS_TOKEN }}"
-      }
-    },
-    "puppeteer": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-puppeteer"
-      ]
-    },
-    "sqlite": {
-      "command": "uvx",
-      "args": [
-        "--with",
-        "mcp<=1.1.2",
-        "mcp-server-sqlite",
-        "--db-path",
-        "{{ env.HOME }}/code/workspace.db"
-      ]
+      "disabled": false
     },
     "memory": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-memory"
-      ]
+      "command": "/usr/local/bin/mcp-server-memory",
+      "env": {
+        "MEMORY_FILE_PATH": "{{ env.HOME }}/sync/ai/mcp-memory.jsonl"
+      },
+      "disabled": false
     },
     "fetch": {
-      "command": "uvx",
-      "args": [
-        "mcp-server-fetch"
-      ]
+      "command": "{{ env.HOME }}/.local/bin/mcp-server-fetch",
+      "disabled": false
     },
     "git": {
-      "command": "uvx",
-      "args": [
-        "mcp-server-git"
-      ]
+      "command": "{{ env.HOME }}/.local/bin/mcp-server-git",
+      "disabled": false
     },
     "arxiv": {
-      "command": "uvx",
+      "command": "{{ env.HOME }}/.local/bin/arxiv-mcp-server",
       "args": [
-        "arxiv-mcp-server",
         "--storage-path",
         "{{ env.HOME }}/Obsidian/Ph.D./Papers/arxiv"
-      ]
+      ],
+      "disabled": false
     },
     "zotero": {
-      "command": "uvx",
-      "args": [
-        "zotero-mcp-server"
-      ],
+      "command": "{{ env.HOME }}/.local/bin/zotero-mcp",
       "env": {
         "ZOTERO_LOCAL": "true"
-      }
+      },
+      "disabled": false
+    },
+    "markitdown": {
+      "command": "{{ env.HOME }}/.local/bin/markitdown-mcp",
+      "disabled": false
+    },
+    "serena": {
+      "command": "{{ env.HOME }}/.local/bin/serena",
+      "args": [
+        "start-mcp-server",
+        "--context=antigravity",
+        "--open-web-dashboard",
+        "False"
+      ],
+      "disabled": true
+    },
+    "nextcloud": {
+      "command": "{{ env.HOME }}/.local/bin/nextcloud-mcp-server",
+      "args": [
+        "run",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "NEXTCLOUD_HOST": "{{ env.NEXTCLOUD_HOST }}",
+        "NEXTCLOUD_USERNAME": "{{ env.NEXTCLOUD_USERNAME }}",
+        "NEXTCLOUD_PASSWORD": "{{ env.NEXTCLOUD_PASSWORD }}"
+      },
+      "disabled": true
+    },
+    "docker": {
+      "command": "{{ env.HOME }}/.local/bin/mcp-server-docker",
+      "env": {
+        "DOCKER_HOST": "tcp://127.0.0.1:2375"
+      },
+      "disabled": true
     }
   }
 }
