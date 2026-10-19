@@ -12,7 +12,7 @@
       "canonical": "openai",
       "package": "@opencode/ai/providers/openai/responses",
       "settings": {
-        "baseURL": "https://dragtokens.com/v1",
+        "baseURL": "http://127.0.0.1:4097/v1",
         "apiKey": "{{ env.DRAGTOKENS_API_KEY }}"
       },
       "models": {
