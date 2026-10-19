@@ -48,3 +48,7 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 ## 2026-10-19: OpenCode 2 (ansible US-14.3)
 - OpenCode 2.0.32; updates are handled by the `ai_desktop` role plus a daily timer. yadm `opencode.json##template` stays in V1 format (V2 reads it); removed the V1-only `plugin` (opencode-yolo) and the ignored `server` block; `/yolo` command deleted. Use `opencode --auto` for auto-approval.
 - `~/.config/opencode/service.json` (V2 server password) is git-ignored.
+
+## 2026-10-19: OpenCode native V2 config
+- `opencode.json##template` is native V2 (`providers`, `agents`, `mcp.servers`, `update: auto`). After `yadm pull` on a machine still on V1, run the ansible playbook immediately (V1 cannot read this shape).
+- DragTokens unreachable on the school network (FortiGuard DNS + SNI filter); see ansible handoff US-14.4.
