@@ -1,0 +1,10 @@
+{
+  "deniedMcpServers": [
+    { "serverName": "plugin:workstation-mcp:memory" },
+    { "serverName": "plugin:workstation-mcp:nextcloud" },
+    { "serverName": "plugin:workstation-mcp:zotero" },
+    { "serverName": "plugin:workstation-mcp:arxiv" },
+    { "serverName": "plugin:workstation-mcp:serena" }
+  ],
+  "disableClaudeAiConnectors": true
+}
