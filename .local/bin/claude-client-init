@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# claude-client-init: isolate a client project from personal Claude Code tools
+# 1. Merges ~/.config/ai/client-settings.json into <dir>/.claude/settings.local.json
+#    (denies personal MCP servers, disables claude.ai connectors; keeps other keys)
+# 2. Adds .claude/settings.local.json and .serena/ to the repo's .git/info/exclude
+# Usage: claude-client-init [--check] [dir]   (dir defaults to the current directory)
+# Claude Code reads project settings only from the session's own directory, so run
+# this once in every client repo or worktree root.
+# ==============================================================================
+
+set -euo pipefail
+
+POLICY="${HOME}/.config/ai/client-settings.json"
+EXCLUDES=(".claude/settings.local.json" ".serena/")
+
+log_info() {
+    echo -e "\033[1;34m[INFO]\033[0m $1"
+}
+
+log_success() {
+    echo -e "\033[1;32m[SUCCESS]\033[0m $1"
+}
+
+log_error() {
+    echo -e "\033[1;31m[ERROR]\033[0m $1" >&2
+}
+
+usage() {
+    echo "Usage: $(basename "$0") [--check] [dir]" >&2
+    exit 2
+}
+
+mode="apply"
+if [[ "${1:-}" == "--check" ]]; then
+    mode="check"
+    shift
+fi
+[[ $# -le 1 ]] || usage
+[[ "${1:-}" != -* ]] || usage
+
+target="$(realpath -e -- "${1:-$PWD}")" || { log_error "Directory not found: ${1:-$PWD}"; exit 1; }
+[[ -d "$target" ]] || { log_error "Not a directory: $target"; exit 1; }
+[[ -r "$POLICY" ]] || { log_error "Policy file missing: $POLICY"; exit 1; }
+
+settings="${target}/.claude/settings.local.json"
+
+# Merge (apply) or compare (check) the policy; never overwrites unparseable JSON.
+python3 -I - "$mode" "$POLICY" "$settings" <<'EOF'
+import json, os, sys, tempfile
+
+mode, policy_path, settings_path = sys.argv[1:4]
+with open(policy_path) as f:
+    policy = json.load(f)
+wanted = [e["serverName"] for e in policy["deniedMcpServers"]]
+
+current = {}
+if os.path.exists(settings_path):
+    try:
+        with open(settings_path) as f:
+            current = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        sys.exit(f"Cannot parse {settings_path}: {e}")
+    if not isinstance(current, dict):
+        sys.exit(f"Unexpected JSON structure in {settings_path}")
+
+denied = current.get("deniedMcpServers", [])
+have = {e.get("serverName") for e in denied if isinstance(e, dict)}
+missing = [n for n in wanted if n not in have]
+connectors_off = current.get("disableClaudeAiConnectors") is True
+
+if mode == "check":
+    if missing or not connectors_off:
+        print("UNPROTECTED: missing " + ", ".join(missing + ([] if connectors_off else ["disableClaudeAiConnectors"])))
+        sys.exit(3)
+    print("PROTECTED")
+    sys.exit(0)
+
+current["deniedMcpServers"] = denied + [{"serverName": n} for n in missing]
+current["disableClaudeAiConnectors"] = True
+os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(settings_path), prefix=".settings.", suffix=".tmp")
+with os.fdopen(fd, "w") as f:
+    json.dump(current, f, indent=2)
+    f.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, settings_path)
+print(f"Added {len(missing)} denylist entr{'y' if len(missing) == 1 else 'ies'}")
+EOF
+
+[[ "$mode" == "check" ]] && exit 0
+
+if git -C "$target" rev-parse --git-dir >/dev/null 2>&1; then
+    exclude_file="$(git -C "$target" rev-parse --path-format=absolute --git-path info/exclude)"
+    mkdir -p "$(dirname "$exclude_file")"
+    touch "$exclude_file"
+    for pattern in "${EXCLUDES[@]}"; do
+        grep -qxF -- "$pattern" "$exclude_file" || echo "$pattern" >> "$exclude_file"
+    done
+    log_info "Git excludes ensured in $exclude_file"
+else
+    log_info "Not a git repository; skipped git excludes"
+fi
+
+log_success "Client isolation applied to $target (restart running Claude sessions there)"
