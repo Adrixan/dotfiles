@@ -44,3 +44,7 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 - yadm `~/.config/opencode/opencode.json##template`: provider `dragtokens` (`@ai-sdk/openai`, `https://dragtokens.com/v1`, key `{{ env.DRAGTOKENS_API_KEY }}`); plan agent `gpt-6-astra`, build agent `gpt-6.1-sol` (`gpt-6-sol` also listed).
 - `DRAGTOKENS_API_KEY` lives only in `~/.config/ai/env` (0600, Ansible-managed) and the rendered `opencode.json` (0600, untracked). OpenCode binary: native `~/.opencode/bin/opencode` from the `ai_desktop` role.
 - Pending: live call untested (dragtokens.com blocked by the FortiGuard DNS filter on the current wired network). Decide whether DragTokens may ever see client code (see the ansible handoff).
+
+## 2026-10-19: OpenCode 2 (ansible US-14.3)
+- OpenCode 2.0.32; updates are handled by the `ai_desktop` role plus a daily timer. yadm `opencode.json##template` stays in V1 format (V2 reads it); removed the V1-only `plugin` (opencode-yolo) and the ignored `server` block; `/yolo` command deleted. Use `opencode --auto` for auto-approval.
+- `~/.config/opencode/service.json` (V2 server password) is git-ignored.

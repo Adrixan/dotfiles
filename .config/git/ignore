@@ -83,3 +83,4 @@
 
 # Serena per-project index and memories
 .serena/
+.config/opencode/service.json
