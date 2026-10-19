@@ -39,3 +39,8 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
   6. Marp skill with a theme derived from `CD_Richtlinien_2026`.
   7. Optional Zellij layout and launcher (fall back to plain `claude` when `--continue` finds no session).
 - Side issue: grml `chpwd` errors with `bad math expression` because `DIRSTACKSIZE` is empty in non-interactive shells (`~/.config/zsh/grml:1626`).
+
+## 2026-10-19: OpenCode on DragTokens (ansible US-14.2)
+- yadm `~/.config/opencode/opencode.json##template`: provider `dragtokens` (`@ai-sdk/openai`, `https://dragtokens.com/v1`, key `{{ env.DRAGTOKENS_API_KEY }}`); plan agent `gpt-6-astra`, build agent `gpt-6.1-sol` (`gpt-6-sol` also listed).
+- `DRAGTOKENS_API_KEY` lives only in `~/.config/ai/env` (0600, Ansible-managed) and the rendered `opencode.json` (0600, untracked). OpenCode binary: native `~/.opencode/bin/opencode` from the `ai_desktop` role.
+- Pending: live call untested (dragtokens.com blocked by the FortiGuard DNS filter on the current wired network). Decide whether DragTokens may ever see client code (see the ansible handoff).

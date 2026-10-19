@@ -10,8 +10,36 @@
           "anthropic-workspace-id": "{{ env.ANTHROPIC_WORKSPACE_ID }}"
         }
       }
-    }  },
+    },
+    "dragtokens": {
+      "npm": "@ai-sdk/openai",
+      "name": "DragTokens",
+      "options": {
+        "baseURL": "https://dragtokens.com/v1",
+        "apiKey": "{{ env.DRAGTOKENS_API_KEY }}"
+      },
+      "models": {
+        "gpt-6-astra": {
+          "name": "GPT-6 Astra"
+        },
+        "gpt-6.1-sol": {
+          "name": "GPT-6.1 Sol"
+        },
+        "gpt-6-sol": {
+          "name": "GPT-6 Sol"
+        }
+      }
+    }
+  },
   "model": "anthropic/claude-sonnet-4-5",
+  "agent": {
+    "plan": {
+      "model": "dragtokens/gpt-6-astra"
+    },
+    "build": {
+      "model": "dragtokens/gpt-6.1-sol"
+    }
+  },
   "server": {
     "hostname": "127.0.0.1",
     "port": 4096,
