@@ -1,8 +1,5 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    "@frankhommers/opencode-yolo"
-  ],
   "provider": {
     "anthropic": {
       "options": {
@@ -39,11 +36,6 @@
     "build": {
       "model": "dragtokens/gpt-6.1-sol"
     }
-  },
-  "server": {
-    "hostname": "127.0.0.1",
-    "port": 4096,
-    "mdns": false
   },
   "mcp": {
     "github": {
