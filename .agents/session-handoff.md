@@ -27,3 +27,15 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 - NowCoding provider removed from OpenCode and the ai_workstation role (2026-10-18).
 - Rule change (2026-10-18): `auto_commit_and_push` in `~/.config/ai/AGENTS.md` now merges feature branches back into `main`/`master` automatically (`pull --ff-only`, `merge --no-ff`, push). Long-lived non-default branches (e.g. ansible `laptops`) are not merged without approval.
 - `feat/mcp-stack-overhaul` merged into yadm `master`.
+
+## 2026-10-19: Applying `~/Claude-cli-desktop.md` (step-by-step)
+- Re-evaluated the report for all five domains: PhD (`~/Obsidian/Ph.D.`), Educator social (`~/Obsidian/Adrixan/Educator`), Teaching (`~/Obsidian/Adrixan/Teaching`, `~/Documents/Unterricht`, PWA repos), Freelance (`~/code/*`), Travel/life (Desktop + claude.ai connectors). The report's `~/workspace/` layout is rejected by the user.
+- Step 1 done: `cleanupPeriodDays: 365` in `~/.claude/settings.json` (yadm). "Help improve Claude" training setting confirmed OFF by the user on 2026-10-19.
+- Remaining steps, in order:
+  2. Split client sessions from personal tools (global `memory` MCP at `~/sync/ai/mcp-memory.jsonl` plus Nextcloud/GitHub must not load in `~/code/<client>`).
+  3. PhD: `/screen` + `/extract` skills (PRISMA-ScR charting for P1), Zotero vs `references.bib` source-of-truth decision, install `ocrmypdf`. Name clash: `cli-anything-zotero` vs the installed `zotero-cli` from zotero-mcp-server.
+  4. `claude remote-control` user unit in `ai_workstation/tasks/remote_control.yml`; blocked on the LUKS unlock decision (`cr_root` asks for a passphrase at boot) and on whether `schulpc` is the user's own hardware.
+  5. Educator `CLAUDE.md` + `edu-*` drafting skills (avoid `/schedule`, a built-in); publishing through self-hosted Postiz (not deployed yet).
+  6. Marp skill with a theme derived from `CD_Richtlinien_2026`.
+  7. Optional Zellij layout and launcher (fall back to plain `claude` when `--continue` finds no session).
+- Side issue: grml `chpwd` errors with `bad math expression` because `DIRSTACKSIZE` is empty in non-interactive shells (`~/.config/zsh/grml:1626`).
