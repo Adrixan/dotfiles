@@ -84,3 +84,6 @@
 # Serena per-project index and memories
 .serena/
 .config/opencode/service.json
+
+# Zotero MCP local write key (machine-local secret)
+.config/zotero-mcp/
