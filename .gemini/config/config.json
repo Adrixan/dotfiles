@@ -1,34 +1,34 @@
 {
   "plugins": {
     "android-cli-plugin": {
-      "enabled": false
+      "enabled": true
     },
     "chrome-devtools-plugin": {
-      "enabled": false
+      "enabled": true
     },
     "data-agent-kit-plugin": {
-      "enabled": false
+      "enabled": true
     },
     "firebase": {
-      "enabled": false
+      "enabled": true
     },
     "flutter": {
-      "enabled": false
+      "enabled": true
     },
     "gemini-api": {
-      "enabled": false
+      "enabled": true
     },
     "google-antigravity-sdk": {
-      "enabled": false
+      "enabled": true
     },
     "google_maps_platform": {
-      "enabled": false
+      "enabled": true
     },
     "modern-web-guidance-plugin": {
-      "enabled": false
+      "enabled": true
     },
     "science": {
-      "enabled": false
+      "enabled": true
     }
   },
   "userSettings": {
