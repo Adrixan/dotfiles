@@ -119,7 +119,7 @@
           "--open-web-dashboard",
           "False"
         ],
-        "disabled": true
+        "disabled": false
       },
       "nextcloud": {
         "type": "local",
@@ -134,7 +134,7 @@
           "NEXTCLOUD_USERNAME": "{{ env.NEXTCLOUD_USERNAME }}",
           "NEXTCLOUD_PASSWORD": "{{ env.NEXTCLOUD_PASSWORD }}"
         },
-        "disabled": true
+        "disabled": false
       },
       "docker": {
         "type": "local",
@@ -144,7 +144,7 @@
         "environment": {
           "DOCKER_HOST": "tcp://127.0.0.1:2375"
         },
-        "disabled": true
+        "disabled": false
       }
     }
   }

@@ -66,10 +66,11 @@
       "args": [
         "start-mcp-server",
         "--context=antigravity",
+        "--project-from-cwd",
         "--open-web-dashboard",
         "False"
       ],
-      "disabled": true
+      "disabled": false
     },
     "nextcloud": {
       "command": "{{ env.HOME }}/.local/bin/nextcloud-mcp-server",
@@ -83,14 +84,14 @@
         "NEXTCLOUD_USERNAME": "{{ env.NEXTCLOUD_USERNAME }}",
         "NEXTCLOUD_PASSWORD": "{{ env.NEXTCLOUD_PASSWORD }}"
       },
-      "disabled": true
+      "disabled": false
     },
     "docker": {
       "command": "{{ env.HOME }}/.local/bin/mcp-server-docker",
       "env": {
         "DOCKER_HOST": "tcp://127.0.0.1:2375"
       },
-      "disabled": true
+      "disabled": false
     }
   }
 }
