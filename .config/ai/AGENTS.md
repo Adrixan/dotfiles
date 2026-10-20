@@ -23,12 +23,14 @@ lifestyle_culture:
 </identity>
 
 <technical_environment>
-workstation: Linux laptop | OS: openSUSE Tumbleweed | Shell: Zsh
+workstation: schulpc (always-on desktop) plus laptops m11x and xps13 | OS: openSUSE Tumbleweed | Shell: Zsh
 packages_containers: Native packages via Zypper | Services via Docker | Desktop GUI apps via Flatpak (Flathub)
 mobile_sync: Android device | Continuous sync via Syncthing | Cloud: self-hosted Nextcloud instance
 web_hosting: Netcup webhosting (PHP, MySQL, background cron automation)
 pkm_workflow: Atomic Markdown files transitioning to automated stream processing (RSS feeds, programmatic ingestion, backend sorting scripts, cron automation)
 workspace_locality: Write all scratch scripts, test runners, temp data, and debug tools strictly to `.scratch/` inside active working dir; NEVER use internal cache/brain paths (`~/.claude/`, `~/.gemini/`, `/tmp`). Write non-code notes/logs directly to target working dir or Obsidian vault.
+knowledge_map: Before working on the Ph.D. vault, the Prof. Aufner educator brand, teaching materials, edu-publisher, Ansible, hosting or harness configuration, read the private knowledge map `~/sync/ai/WORKSTATION.md` (Syncthing, all devices). It is deliberately not part of this public file: never copy its content into public repositories. Update it whenever such a setup changes.
+project_context: Project instructions live in `AGENTS.md` at the project root (read natively by OpenCode, Copilot and Antigravity; Gemini CLI via `context.fileName`); `CLAUDE.md` only imports it with `@AGENTS.md`. Project skills live in `.claude/skills/<name>/SKILL.md`; a harness without native skill support reads the SKILL.md listed in the project `AGENTS.md` before a matching task.
 session_continuity: Maintain `.agents/session-handoff.md` at end of non-trivial tasks or pre-exit (conversational trajectory, active intent, pending decisions, next steps) for seamless cross-device/cross-harness resumption. When starting a task in any repository or directory, inspect `.agents/session-handoff.md` and `.agents/` state files first to resume context seamlessly without requiring local machine chat history.
 </technical_environment>
 
@@ -109,6 +111,7 @@ task_triage:
   existing_codebase: Inspect and follow existing conventions before modifying code.
   non_trivial: Clarify requirements, assumptions, and open questions before coding.
   managed_mode: Follow Agile/TDD story loop with `.agents/` state files (`project-state.md`, `plan.md`, `to-do.md`) when present.
+dependency_policy: Use only the latest stable release of every library, framework, tool, container image and CI action. Look up the current version in the registry (PyPI, npm, Packagist, crates.io, Docker Hub, GitHub releases) before adding, pinning or upgrading; never rely on remembered version numbers. Never add or keep a version with a known vulnerability: check OSV and GitHub Security Advisories and run the ecosystem audit (`pip-audit`, `npm audit`, `composer audit`, `cargo audit` or `osv-scanner`) before committing. If the latest release is itself affected, use a fixed release or an alternative and report it. Pin exact versions in lockfiles, no pre-releases unless asked. Major upgrades in existing projects follow approval_gates.
 approval_gates: Never drop scope, pivot approach, or make breaking architectural changes without explicit user approval.
 debug_protocol: If an approach fails twice, stop and re-evaluate assumptions. Present alternative options with trade-offs.
 correctness_protocol:
