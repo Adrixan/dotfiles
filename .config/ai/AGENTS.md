@@ -1,6 +1,6 @@
 # AI Workstation Core Instructions
 
-Universal behavioral, communication, and engineering standards for all AI harnesses (Antigravity, Claude Code, OpenCode, Copilot).
+Universal behavioral, communication, and engineering standards for the three supported AI harnesses: Claude Code, Antigravity (agy) and OpenCode. They are configured to behave as identically as possible; no other harness (Copilot, Kilo, Gemini CLI) is used.
 
 <system_context>
 <user_profile>
@@ -30,7 +30,7 @@ web_hosting: Netcup webhosting (PHP, MySQL, background cron automation)
 pkm_workflow: Atomic Markdown files transitioning to automated stream processing (RSS feeds, programmatic ingestion, backend sorting scripts, cron automation)
 workspace_locality: Write all scratch scripts, test runners, temp data, and debug tools strictly to `.scratch/` inside active working dir; NEVER use internal cache/brain paths (`~/.claude/`, `~/.gemini/`, `/tmp`). Write non-code notes/logs directly to target working dir or Obsidian vault.
 knowledge_map: Before working on the Ph.D. vault, the Prof. Aufner educator brand, teaching materials, edu-publisher, Ansible, hosting or harness configuration, read the private knowledge map `~/sync/ai/WORKSTATION.md` (Syncthing, all devices). It is deliberately not part of this public file: never copy its content into public repositories. Update it whenever such a setup changes.
-project_context: Project instructions live in `AGENTS.md` at the project root (read natively by OpenCode, Copilot and Antigravity; Gemini CLI via `context.fileName`); `CLAUDE.md` only imports it with `@AGENTS.md`. Project skills live in `.claude/skills/<name>/SKILL.md`; a harness without native skill support reads the SKILL.md listed in the project `AGENTS.md` before a matching task.
+project_context: Project instructions live in `AGENTS.md` at the project root (read natively by OpenCode and Antigravity); `CLAUDE.md` only imports it with `@AGENTS.md`. Project skills live in `.claude/skills/<name>/SKILL.md`. Global skills: `~/.claude/skills` (links into `~/.local/share/skills`) is the single source; Claude Code and OpenCode read it natively, Antigravity through `~/.gemini/config/skills.json` (also covers project `.claude/skills`). Add a new global skill to `~/.local/share/skills` and link it in `~/.claude/skills`, never in a harness-specific folder.
 session_continuity: Maintain `.agents/session-handoff.md` at end of non-trivial tasks or pre-exit (conversational trajectory, active intent, pending decisions, next steps) for seamless cross-device/cross-harness resumption. When starting a task in any repository or directory, inspect `.agents/session-handoff.md` and `.agents/` state files first to resume context seamlessly without requiring local machine chat history.
 </technical_environment>
 
@@ -121,3 +121,9 @@ correctness_protocol:
 auto_commit_and_push: After completing and verifying a change in a git repository, commit and push all related changes without asking. Use Conventional Commits. If on the default branch (`main`/`master`), create a feature branch first, push it, then merge it back automatically: update the default branch (`git pull --ff-only`), `git merge --no-ff` the feature branch, and push the default branch. Work done on an existing long-lived non-default branch (e.g. `laptops`) stays on that branch and is merged into the default branch only with explicit approval. Never commit secrets, never force-push, and stop and report if hooks, tests, the push, or the merge fail (run `git merge --abort` on conflicts).
 </code_and_engineering_discipline>
 </system_context>
+
+<!-- Knowledge map include (see knowledge_map): Claude Code and Antigravity inline it from the lines below; OpenCode loads it through `instructions` in opencode.json. -->
+
+@~/sync/ai/WORKSTATION.md
+
+@[knowledge map](/home/Adrixan/sync/ai/WORKSTATION.md)

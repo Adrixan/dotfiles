@@ -1,0 +1,8 @@
+{
+  "entries": [
+    { "path": "{{ env.HOME }}/.claude/skills" },
+    { "path": "{{ env.HOME }}/.local/share/skills/claude-synced" },
+    { "path": "{{ env.HOME }}/.claude/plugins/marketplaces/claude-plugins-official/plugins/frontend-design/skills" },
+    { "path": ".claude/skills" }
+  ]
+}
