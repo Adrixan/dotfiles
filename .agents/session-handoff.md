@@ -58,3 +58,9 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 ## 2026-10-19: OpenCode native V2 config
 - `opencode.json##template` is native V2 (`providers`, `agents`, `mcp.servers`, `update: auto`). After `yadm pull` on a machine still on V1, run the ansible playbook immediately (V1 cannot read this shape).
 - DragTokens unreachable on the school network (FortiGuard DNS + SNI filter); see ansible handoff US-14.4.
+
+## 2026-10-20: Harness parity (Claude Code, Antigravity, OpenCode), Copilot and Kilo removed
+- Agent instructions and skills are tracked only in yadm. Ansible (`laptops` 73440c4) no longer has `instructions.yml`, `skills.yml` or the AGENTS.md seed template; check-mode run clean.
+- Copilot and Kilo removed: `~/.copilot`, the `copilot-instructions` and `kilo-glm5-instructions` submodules with their symlinks, `.kilocode`, `.copilot`, `.github/{agents,skills,instructions}`, GLM `agents.md` in 22 repos under `~/code` (merged into `main`; feature branches peter.aufner.org, code-alongsi.de, Cast-Game and ansible `laptops` keep their commits unmerged). Untracked remnants moved to `/backup/ai/`. The GitHub repos `Adrixan/copilot-instructions` and `Adrixan/kilo-glm5-instructions` still exist.
+- Same inputs in all three harnesses, verified by headless probes: global AGENTS.md plus the private knowledge map (Claude `@~/` import, Antigravity `@[..](abs)` include, OpenCode `instructions`), project AGENTS.md, skills from `~/.claude/skills` plus project `.claude/skills` (Antigravity via `~/.gemini/config/skills.json##template`), same MCP set. Antigravity plugins disabled, skill bundle and bailian links removed.
+- Next: keep the global AGENTS.md plus knowledge map under Antigravity's 24 KB per-rule-file cap (about 22.6 KB now).

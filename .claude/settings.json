@@ -13,17 +13,6 @@
     ],
     "defaultMode": "auto"
   },
-  "skillOverrides": {
-    "bailian-cli": "off",
-    "bailian-docs-llm-wiki": "off",
-    "bailian-finetune": "off",
-    "bailian-gen": "off",
-    "bailian-managed-agent": "off",
-    "bailian-model-recommend": "off",
-    "bailian-protocol": "off",
-    "bailian-train-deploy": "off",
-    "bailian-web-search": "off"
-  },
   "enableWorkflows": true,
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": true,
