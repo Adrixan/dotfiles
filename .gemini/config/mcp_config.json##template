@@ -26,7 +26,11 @@
     "memory": {
       "command": "/usr/local/bin/mcp-server-memory",
       "env": {
+{% if env.TERMUX_VERSION != "" %}
+        "MEMORY_FILE_PATH": "{{ env.HOME }}/storage/shared/sync/ai/mcp-memory.jsonl"
+{% else %}
         "MEMORY_FILE_PATH": "{{ env.HOME }}/sync/ai/mcp-memory.jsonl"
+{% endif %}
       },
       "disabled": false
     },

@@ -75,9 +75,6 @@
 .local/share/skills/synced/
 .local/share/skills/synced
 
-# Bailian (private key & telemetry)
-.bailian/
-
 # Playwright MCP page snapshots
 .playwright-mcp/
 
