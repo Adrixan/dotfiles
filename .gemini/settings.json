@@ -3,5 +3,11 @@
     "auth": {
       "selectedType": "oauth-personal"
     }
+  },
+  "context": {
+    "fileName": [
+      "AGENTS.md",
+      "GEMINI.md"
+    ]
   }
 }
