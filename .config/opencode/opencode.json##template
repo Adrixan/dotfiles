@@ -145,6 +145,34 @@
           "DOCKER_HOST": "tcp://127.0.0.1:2375"
         },
         "disabled": false
+      },
+{% if env.TERMUX_VERSION == "" %}
+      "ptsd": {
+        "type": "local",
+        "command": [
+          "/usr/bin/node",
+          "{{ env.HOME }}/code/PTSD/mcp/dist/server.mjs"
+        ]
+      },
+{% endif %}
+      "newspaper-testground": {
+        "type": "local",
+        "command": [
+          "ssh",
+          "-T",
+          "-o",
+          "BatchMode=yes",
+          "-o",
+          "ConnectTimeout=10",
+          "-o",
+          "ServerAliveInterval=30",
+          "ubuntu@testground.code-alongsi.de",
+          "cd ~/nexcloud-offline-newspaper && exec ~/.local/bin/uv run --quiet offline-newspaper-mcp --vault-path /home/ubuntu/news_vault --allow-write"
+        ],
+        "timeout": {
+          "startup": 30000,
+          "catalog": 30000
+        }
       }
     }
   }
