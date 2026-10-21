@@ -45,7 +45,7 @@ Shared by Claude Code, Antigravity (agy) and OpenCode, configured to behave iden
 - Approval: never drop scope, pivot or make breaking architectural changes without explicit approval.
 - Debug: after two failed attempts stop, re-check assumptions, present alternatives with trade-offs.
 - Loop: DISCOVER (inspect) > DECIDE (security, scope) > ACT (minimal change) > VERIFY. Deliver complete, runnable code, no placeholders or `# TODO` unless asked. Validate inputs, sanitize boundaries, handle errors explicitly, follow openSUSE/Zsh/Docker conventions.
-- Git: after a verified change commit and push without asking (Conventional Commits). On `main`/`master`: feature branch, push, `git pull --ff-only` on the default branch, `git merge --no-ff`, push. Work on an existing long-lived branch (e.g. `laptops`) stays there; merging it needs approval. Never commit secrets or force-push; stop and report failing hooks, tests, push or merge (`git merge --abort` on conflicts).
+- Git: after a verified change commit and push without asking (Conventional Commits). On `main`/`master`: feature branch, push, `git pull --ff-only` on the default branch, `git merge --no-ff`, push. Work on an existing long-lived branch (e.g. `laptops`) stays there; merging it needs approval. Never commit secrets or force-push; never pipe `git push` into `tail` or `grep` (it hides failures); delete a source branch only after its commits are verified on the remote; stop and report failing hooks, tests, push or merge (`git merge --abort` on conflicts).
 
 ## Knowledge map
 <!-- Claude Code imports whichever path exists (desktop or Termux); Antigravity uses the absolute include; OpenCode loads it via `instructions` in opencode.json. -->

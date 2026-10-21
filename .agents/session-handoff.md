@@ -3,7 +3,7 @@
 ## Trajectory
 - Inspected dotfile status and existing tracked configurations in yadm.
 - Discovered that the remote repository `Adrixan/dotfiles` is public on GitHub.
-- Audited all AI harness configuration files across Claude Code, Gemini CLI (Antigravity), OpenCode, and Copilot.
+- Audited all AI harness configuration files across Claude Code, Antigravity and OpenCode.
 - Identified sensitive secrets (GitHub Personal Access Tokens, NowCoding API keys, OAuth credentials) and local machine state (databases, chat histories, session logs, dynamic caches).
 - Registered the git-based skill extension (`.local/share/skills/ELI5`) as a yadm submodule.
 - Unloaded duplicate skill directories in `.claude/skills` and replaced them with unified symlinks pointing to `.local/share/skills/`, matching `.gemini/skills/` and `.config/opencode/skills/`.
@@ -11,7 +11,7 @@
 - Configured comprehensive exclusion rules in `.config/git/ignore` to prevent leaking machine-local files, session databases, or tokens.
 - Staged and committed all CLI-relevant, portable configuration files and submodules to yadm.
 - Applied `~/Obsidian/Adrixan/Claude System Context.md` into the canonical global instruction file `~/.config/ai/AGENTS.md`, merging it with existing cross-harness engineering and session-continuity standards.
-- Standardized relative symlinks across all global AI harnesses (`~/.claude/CLAUDE.md`, `~/.gemini/GEMINI.md`, `~/.config/opencode/AGENTS.md`, `~/.agents/AGENTS.md`, `~/.copilot/copilot-instructions.md`, `~/AGENTS.md`, `~/CLAUDE.md`) pointing to `~/.config/ai/AGENTS.md`.
+- Standardized relative symlinks across all global AI harnesses (`~/.claude/CLAUDE.md`, `~/.gemini/GEMINI.md`, `~/.config/opencode/AGENTS.md`, `~/.agents/AGENTS.md`, `~/AGENTS.md`, `~/CLAUDE.md`) pointing to `~/.config/ai/AGENTS.md`.
 
 ## Active Intent
 Maintain a portable, secure, conflict-free multi-harness AI workstation configuration across devices via yadm.
@@ -42,7 +42,7 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 
 ## 2026-10-20: Shared knowledge for all harnesses
 - Private knowledge map `~/sync/ai/WORKSTATION.md` (mode 600, Syncthing to all devices; machines, network block, config ownership, Claude Code setup, PhD, educator/publisher, teaching CD, open items). Pointer `knowledge_map:` in `~/.config/ai/AGENTS.md`; never copy its content into the public dotfiles or Ansible repos. Update it when a setup changes.
-- Convention `project_context:`: project rules in `AGENTS.md`, `CLAUDE.md` contains only `@AGENTS.md`, skills listed in the project AGENTS.md for harnesses without skill support. Applied to Ph.D. (merge 4d900c6), Educator, Teaching (new AGENTS.md), edu-publisher. Gemini CLI reads AGENTS.md via `context.fileName` in `~/.gemini/settings.json`. Verified with headless `claude -p` probes in Ph.D., Educator and Teaching.
+- Convention `project_context:`: project rules in `AGENTS.md`, `CLAUDE.md` contains only `@AGENTS.md`, skills listed in the project AGENTS.md for harnesses without skill support. Applied to Ph.D. (merge 4d900c6), Educator, Teaching (new AGENTS.md), edu-publisher. Antigravity reads AGENTS.md (`context.fileName` in `~/.gemini/settings.json`). Verified with headless `claude -p` probes in Ph.D., Educator and Teaching.
 - New global rule `dependency_policy:` (latest stable only, registry lookup, no known vulnerabilities, exact pins, major upgrades via approval_gates). Mirrored into the Ansible seed template `roles/ai_workstation/templates/AGENTS.md.j2` (laptops ccedadd). yadm merge 05c7c1b.
 - edu-publisher: private GitHub repo `Adrixan/edu-publisher` (AGPL-3.0, history secret-scanned); Ansible role `edu_publisher` clones it (laptops 19e28b5). Code was already in `~/code/edu-publisher`, so it was not moved.
 
@@ -59,10 +59,23 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 - `opencode.json##template` is native V2 (`providers`, `agents`, `mcp.servers`, `update: auto`). After `yadm pull` on a machine still on V1, run the ansible playbook immediately (V1 cannot read this shape).
 - DragTokens unreachable on the school network (FortiGuard DNS + SNI filter); see ansible handoff US-14.4.
 
-## 2026-10-20: Harness parity (Claude Code, Antigravity, OpenCode), Copilot and Kilo removed
+## 2026-10-20: Harness parity (Claude Code, Antigravity, OpenCode), Kilo removed
 - Agent instructions and skills are tracked only in yadm. Ansible (`laptops` 73440c4) no longer has `instructions.yml`, `skills.yml` or the AGENTS.md seed template; check-mode run clean.
-- Copilot and Kilo removed: `~/.copilot`, the `copilot-instructions` and `kilo-glm5-instructions` submodules with their symlinks, `.kilocode`, `.copilot`, `.github/{agents,skills,instructions}`, GLM `agents.md` in 22 repos under `~/code` (merged into `main`; peter.aufner.org, code-alongsi.de and Cast-Game merged into `main` on 2026-10-21; ansible `laptops` stays unmerged until approved). Untracked remnants were parked in `/backup/ai/` and deleted by Peter on 2026-10-21, together with `~/.bailian`. The GitHub repos `Adrixan/copilot-instructions` and `Adrixan/kilo-glm5-instructions` still exist.
+- Kilo removed: the `kilo-glm5-instructions` submodule with its symlinks, `.kilocode`, `.github/{agents,skills,instructions}`, GLM `agents.md` in 22 repos under `~/code` (merged into `main`; peter.aufner.org, code-alongsi.de and Cast-Game merged into `main` on 2026-10-21; ansible `laptops` stays unmerged until approved). Untracked remnants were parked in `/backup/ai/` and deleted by Peter on 2026-10-21, together with `~/.bailian`.
 - Same inputs in all three harnesses, verified by headless probes: global AGENTS.md plus the private knowledge map (Claude `@~/` import, Antigravity `@[..](abs)` include, OpenCode `instructions`), project AGENTS.md, skills from `~/.claude/skills` plus project `.claude/skills` (Antigravity via `~/.gemini/config/skills.json##template`), same MCP set. Antigravity skill bundle removed.
 - Next: keep the global AGENTS.md plus knowledge map under Antigravity's 24 KB per-rule-file cap (about 22.6 KB now).
-- Follow-up 2026-10-20: global AGENTS.md compacted (rules plus knowledge map 22.6 KB to 13.7 KB); CV moved to the on-demand skill `freelance-profile`. Termux: sync root `~/storage/shared/sync`; templates branch on `env.TERMUX_VERSION`, Claude imports both paths. Skill links in `~/.claude/skills` are relative; `~/.config/opencode/skills` and `~/.gemini/skills` removed (single source `~/.claude/skills`). Antigravity Google plugins enabled again. `kilo-glm5-instructions` deleted on GitHub (`copilot-instructions` was already gone).
+- Follow-up 2026-10-20: global AGENTS.md compacted (rules plus knowledge map 22.6 KB to 13.7 KB); CV moved to the on-demand skill `freelance-profile`. Termux: sync root `~/storage/shared/sync`; templates branch on `env.TERMUX_VERSION`, Claude imports both paths. Skill links in `~/.claude/skills` are relative; `~/.config/opencode/skills` and `~/.gemini/skills` removed (single source `~/.claude/skills`). Antigravity Google plugins enabled again. `kilo-glm5-instructions` deleted on GitHub.
 - 2026-10-20 (later): serena, nextcloud and docker MCP enabled in OpenCode and Antigravity (yadm 319d088). New skills: Teaching `marp-slides` (CD theme from the Typst tokens), Ph.D. `docx-cite` (pandoc plus Better BibTeX). Ansible `office_suite` (laptops e6fde27, 618bd90): pinned Marp CLI with audited overrides, pandoc 3.12.1. User guides in `~/Obsidian/Adrixan/AI/`: `AI Workstation Cheatsheet.md`, `New Machine Setup.md`.
+
+## 2026-10-21: claude.ai export imported into the Obsidian vault
+- Export (manifest 2026-10-21 06:50 UTC) downloaded by Peter to `~/import/` (curl and headless Playwright are blocked by Cloudflare). Archive: `~/Obsidian/Adrixan/AI/Claude.ai/` with `_Index.md`, `Projects/<name>/` (project note with *Weiterarbeiten*, `Chats/`, `Wissen/`, `Memory/`, `Artifacts/`), `Chats/<year>/` for chats outside projects, `Memories/`, `Reflections/`. 42 chats, 8 projects; 4 empty chats and 2 unnamed starter projects skipped; login history and phone number not imported.
+- The export has no project id per chat: mapping from memory paths and project_info calls ("belegt"); Reiseplanung (2 chats) and BIMM (2 chats) are inferred from topic and timing (`project_assignment: inferred`).
+- Merged into local data: `Educator/strategie/` (roadmap, kennzeichnungspflichten, news-pipeline from 2026-10-08 with superseded-tooling banners, plus brand-briefing from the project instructions and memory) with a pointer in `Educator/AGENTS.md`; new subtree `Teaching/Doku-Petersgasse/README.md` plus a row in `Teaching/AGENTS.md`. Not merged (local is newer or identical): prof.aufner.org site files (repo 2026-10-13), agents.md (removed 2026-10-20), brand-strategy/socials/social_media_strategy_report (identical), Ph.D. project-state summary (vault 2026-10-19).
+- Open for Peter: delete `~/import/` and the manifest in `~` once the import is checked (they hold the unredacted data); put the final Doku-Petersgasse Office files (only in claude.ai) into `Teaching/Doku-Petersgasse/`; answer the open comment on the Sparplan doc.
+
+## 2026-10-21: One knowledge store for all three harnesses
+- Claude auto-memory held 16 notes in 6 projects that Antigravity and OpenCode could not read. Content moved to shared locations: PTSD `AGENTS.md` + `CLAUDE.md` (merge 383c4bd), prof.aufner.org `AGENTS.md` + `CLAUDE.md` (local only, `*.md` is git-ignored there), Teaching `AGENTS.md` rules, knowledge map (aufner.org bot-UA IP ban, code-alongsi.de Nextcloud playground, list of shared knowledge stores), global AGENTS.md (`Knowledge:` rule, git push pipe pitfall). neon-core was already in `.agents/wissen/`.
+- Claude auto-memory off (`autoMemoryEnabled: false`, yadm 2390171). Original note files archived read-only in `~/Obsidian/Adrixan/AI/Claude Code Memory/` (`_Index.md` maps each to its live location); `~/.claude/projects/*/memory/` is empty.
+- OpenCode models unchanged by decision: TUI uses `agents` build `dragtokens/gpt-6.1-sol` and plan `dragtokens/gpt-6-astra`; top-level default `anthropic/claude-sonnet-4-5` has no API balance. `opencode run` uses the top-level default even with `--agent`, so headless probes pass `-m`.
+- Harness names cleaned: Copilot mentions removed, Gemini CLI renamed to Antigravity (this handoff, knowledge map, neon-core `.agents` on MR !1 branch 17e18d6, wpengine-launcher, venomous-snake). The GitHub MCP URL `api.githubcopilot.com` is functional and stays.
+- Verified with headless probes: agy in PTSD and Teaching/diggb, OpenCode in PTSD (with `-m dragtokens/gpt-6.1-sol`).
