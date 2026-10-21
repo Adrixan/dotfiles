@@ -1,5 +1,6 @@
 {
   "cleanupPeriodDays": 365,
+  "autoMemoryEnabled": false,
   "permissions": {
     "ask": [
       "mcp__plugin_workstation-mcp_nextcloud__nc_mail_send_message",
