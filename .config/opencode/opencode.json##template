@@ -225,6 +225,69 @@
         "url": "http://127.0.0.1:3940/mcp",
         "oauth": false
       },
+      "lighthouse": {
+        "type": "local",
+        "command": [
+          "/usr/local/bin/lighthouse-mcp-server"
+        ],
+        "disabled": true
+      },
+      "accessibility": {
+        "type": "local",
+        "command": [
+          "/usr/local/bin/accessibility-scanner-mcp"
+        ]
+      },
+      "docs": {
+        "type": "remote",
+        "url": "http://127.0.0.1:6280/mcp",
+        "oauth": false
+      },
+      "nasa": {
+        "type": "local",
+        "command": [
+          "/usr/local/bin/nasa-mcp-server"
+        ],
+        "environment": {
+          "NASA_API_KEY": "DEMO_KEY"
+        },
+        "disabled": true
+      },
+      "open-meteo": {
+        "type": "local",
+        "command": [
+          "/usr/local/bin/open-meteo-mcp-server"
+        ],
+        "disabled": true
+      },
+      "wikipedia": {
+        "type": "local",
+        "command": [
+          "{{ env.HOME }}/.local/bin/wikipedia-mcp",
+          "--language",
+          "en"
+        ],
+        "disabled": true
+      },
+      "searxng": {
+        "type": "local",
+        "command": [
+          "/usr/local/bin/mcp-searxng"
+        ]
+      },
+{% endif %}
+{% if env.OPENROUTESERVICE_API_KEY != "" %}
+      "openroute": {
+        "type": "local",
+        "command": [
+          "{{ env.HOME }}/.local/bin/openroute-mcp",
+          "--data-folder",
+          "{{ env.HOME }}/Documents/Routes"
+        ],
+        "environment": {
+          "OPENROUTESERVICE_API_KEY": "{{ env.OPENROUTESERVICE_API_KEY }}"
+        }
+      },
 {% endif %}
       "newspaper-testground": {
         "type": "local",

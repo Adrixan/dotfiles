@@ -13,7 +13,8 @@
       "mcp__plugin_workstation-mcp_github__*delete*"
     ],
     "deny": [
-      "mcp__plugin_workstation-mcp_excalidraw__export_to_excalidraw_url"
+      "mcp__plugin_workstation-mcp_excalidraw__export_to_excalidraw_url",
+      "mcp__plugin_workstation-mcp_wikipedia__wikipedia_*"
     ],
     "defaultMode": "auto"
   },

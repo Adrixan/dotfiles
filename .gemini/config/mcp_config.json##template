@@ -148,6 +148,55 @@
     "obsidian-adrixan": {
       "serverUrl": "http://127.0.0.1:3940/mcp",
       "disabled": false
+    },
+    "lighthouse": {
+      "command": "/usr/local/bin/lighthouse-mcp-server",
+      "disabled": true
+    },
+    "accessibility": {
+      "command": "/usr/local/bin/accessibility-scanner-mcp",
+      "disabled": false
+    },
+    "docs": {
+      "serverUrl": "http://127.0.0.1:6280/mcp",
+      "disabled": false
+    },
+    "nasa": {
+      "command": "/usr/local/bin/nasa-mcp-server",
+      "env": {
+        "NASA_API_KEY": "DEMO_KEY"
+      },
+      "disabled": true
+    },
+    "open-meteo": {
+      "command": "/usr/local/bin/open-meteo-mcp-server",
+      "disabled": true
+    },
+    "wikipedia": {
+      "command": "{{ env.HOME }}/.local/bin/wikipedia-mcp",
+      "args": [
+        "--language",
+        "en"
+      ],
+      "disabled": true
+    },
+    "searxng": {
+      "command": "/usr/local/bin/mcp-searxng",
+      "disabled": false
+    }
+{% endif %}
+{% if env.OPENROUTESERVICE_API_KEY != "" %}
+    ,
+    "openroute": {
+      "command": "{{ env.HOME }}/.local/bin/openroute-mcp",
+      "args": [
+        "--data-folder",
+        "{{ env.HOME }}/Documents/Routes"
+      ],
+      "env": {
+        "OPENROUTESERVICE_API_KEY": "{{ env.OPENROUTESERVICE_API_KEY }}"
+      },
+      "disabled": false
     }
 {% endif %}
   }
