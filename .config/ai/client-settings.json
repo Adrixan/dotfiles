@@ -4,7 +4,8 @@
     { "serverName": "plugin:workstation-mcp:nextcloud" },
     { "serverName": "plugin:workstation-mcp:zotero" },
     { "serverName": "plugin:workstation-mcp:arxiv" },
-    { "serverName": "plugin:workstation-mcp:serena" }
+    { "serverName": "plugin:workstation-mcp:serena" },
+    { "serverName": "file-accountant" }
   ],
   "disableClaudeAiConnectors": true
 }
