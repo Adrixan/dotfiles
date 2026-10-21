@@ -17,6 +17,7 @@ Shared by Claude Code, Antigravity (agy) and OpenCode, configured to behave iden
 - Knowledge map: private `~/sync/ai/WORKSTATION.md`, inlined below. Use it for the Ph.D. vault, educator brand, teaching, edu-publisher, Ansible, hosting and harness config; never copy its content into public repos; update it when a setup changes.
 - Projects: rules in the root `AGENTS.md`; `CLAUDE.md` contains only `@AGENTS.md`. Skills: project `.claude/skills/<name>/SKILL.md`; global `~/.claude/skills` (relative links into `~/.local/share/skills`), read natively by Claude Code and OpenCode, by Antigravity via `~/.gemini/config/skills.json`. New global skill: folder in `~/.local/share/skills` plus a link in `~/.claude/skills`, never a harness folder.
 - Handoff: write `.agents/session-handoff.md` (trajectory, intent, open decisions, next steps) after non-trivial tasks and before exit; read it and the other `.agents/` state files first in any directory.
+- Knowledge: standing orders and project rules go into the project `AGENTS.md`, current state into `.agents/`, cross-project setup into the knowledge map, entity facts into the shared MCP `memory` graph; never into harness-private stores (Claude auto-memory, Antigravity knowledge items), so every harness reads the same.
 
 ## Branding: Bioluminescent Night
 - Default for all UI, web pages, components, CSS and brand assets; full guide `~/.config/ai/BRANDING.md`.
