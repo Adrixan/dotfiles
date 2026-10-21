@@ -154,6 +154,13 @@
           "{{ env.HOME }}/code/PTSD/mcp/dist/server.mjs"
         ]
       },
+      "file-accountant": {
+        "type": "local",
+        "command": [
+          "{{ env.HOME }}/.local/bin/fa",
+          "mcp"
+        ]
+      },
 {% endif %}
       "newspaper-testground": {
         "type": "local",
