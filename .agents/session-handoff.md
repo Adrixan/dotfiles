@@ -80,3 +80,10 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 - Harness names cleaned: Copilot mentions removed, Gemini CLI renamed to Antigravity (this handoff, knowledge map, neon-core `.agents` on MR !1 branch 17e18d6, wpengine-launcher, venomous-snake). The GitHub MCP URL `api.githubcopilot.com` is functional and stays.
 - Verified with headless probes: agy in PTSD and Teaching/diggb, OpenCode in PTSD (with `-m dragtokens/gpt-6.1-sol`).
 - Later: `ptsd` and `newspaper-testground` MCP servers added to the OpenCode template (copied from Claude's user scope in `~/.claude.json`; newspaper with 30 s startup and catalog timeouts). OpenCode service restarted; both connected, ptsd and newspaper tool calls verified. Antigravity still lacks both.
+
+## 2026-10-21: MCP server scouting (mcpservers.org)
+- Crawled mcpservers.org/all (16,455 of 16,667 entries) into `~/.scratch/mcpservers/catalogue.jsonl`; crawler `bin/crawl.py` (rate limit: 1.5 s/page), filters `bin/filter.py`, `bin/show.py`.
+- Shortlist with GitHub metadata in the session answer; nothing installed or changed.
+- Top picks: package-version-check-mcp, StacklokLabs/osv-mcp, `semgrep mcp` (built into semgrep; standalone repo archived), cyanheads/openalex-mcp-server, pho-research-tools, Excalidraw (yctimlin), drawio (lgazo), mcp-zap-server, MCPGoat/DVMCP labs, obsidian-hybrid-search.
+- Next: Peter picks servers; install via Ansible `ai_workstation` plus yadm templates for all three harnesses; run audits before pinning.
+- Gaps (build candidates): Austrian RIS, GeoSphere Austria, EAWS avalanche bulletins, ERIC, Typst compile.

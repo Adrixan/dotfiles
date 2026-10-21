@@ -161,6 +161,65 @@
           "mcp"
         ]
       },
+      "package-versions": {
+        "type": "local",
+        "command": [
+          "{{ env.HOME }}/.local/bin/package-version-check-mcp",
+          "--mode=stdio"
+        ]
+      },
+      "osv": {
+        "type": "local",
+        "command": [
+          "/usr/bin/osv-scanner",
+          "experimental-mcp"
+        ]
+      },
+      "semgrep": {
+        "type": "local",
+        "command": [
+          "{{ env.HOME }}/.local/bin/semgrep",
+          "mcp",
+          "-t",
+          "stdio"
+        ],
+        "environment": {
+          "SEMGREP_SEND_METRICS": "off"
+        }
+      },
+      "openalex": {
+        "type": "local",
+        "command": [
+          "/usr/local/bin/openalex-mcp-server"
+        ],
+        "environment": {
+          "MCP_TRANSPORT_TYPE": "stdio",
+          "MCP_LOG_LEVEL": "error"
+        }
+      },
+      "pho-research": {
+        "type": "remote",
+        "url": "http://127.0.0.1:8787/mcp",
+        "oauth": false
+      },
+      "excalidraw": {
+        "type": "local",
+        "command": [
+          "/usr/local/bin/mcp-excalidraw-server"
+        ],
+        "disabled": true
+      },
+      "drawio": {
+        "type": "local",
+        "command": [
+          "/usr/local/bin/drawio-mcp"
+        ]
+      },
+      "obsidian-phd": {
+        "type": "remote",
+        "url": "http://127.0.0.1:3939/mcp",
+        "oauth": false
+      },
 {% endif %}
       "newspaper-testground": {
         "type": "local",

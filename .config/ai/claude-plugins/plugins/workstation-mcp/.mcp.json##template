@@ -64,5 +64,44 @@
         "DOCKER_HOST": "${MCP_DOCKER_HOST:-tcp://127.0.0.1:2375}"
       }
     }
+{% if env.TERMUX_VERSION == "" %}
+    ,
+    "package-versions": {
+      "command": "${HOME}/.local/bin/package-version-check-mcp",
+      "args": ["--mode=stdio"]
+    },
+    "osv": {
+      "command": "/usr/bin/osv-scanner",
+      "args": ["experimental-mcp"]
+    },
+    "semgrep": {
+      "command": "${HOME}/.local/bin/semgrep",
+      "args": ["mcp", "-t", "stdio"],
+      "env": {
+        "SEMGREP_SEND_METRICS": "off"
+      }
+    },
+    "openalex": {
+      "command": "/usr/local/bin/openalex-mcp-server",
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_LOG_LEVEL": "error"
+      }
+    },
+    "pho-research": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/mcp"
+    },
+    "excalidraw": {
+      "command": "/usr/local/bin/mcp-excalidraw-server"
+    },
+    "drawio": {
+      "command": "/usr/local/bin/drawio-mcp"
+    },
+    "obsidian-phd": {
+      "type": "http",
+      "url": "http://127.0.0.1:3939/mcp"
+    }
+{% endif %}
   }
 }

@@ -84,3 +84,6 @@
 
 # Zotero MCP local write key (machine-local secret)
 .config/zotero-mcp/
+
+# Obsidian Hybrid Search index (per machine; also excluded from Syncthing)
+.obsidian-hybrid-search.db*
