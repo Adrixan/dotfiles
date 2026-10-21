@@ -12,6 +12,9 @@
       "mcp__plugin_workstation-mcp_github__merge_pull_request",
       "mcp__plugin_workstation-mcp_github__*delete*"
     ],
+    "deny": [
+      "mcp__plugin_workstation-mcp_excalidraw__export_to_excalidraw_url"
+    ],
     "defaultMode": "auto"
   },
   "enableWorkflows": true,
