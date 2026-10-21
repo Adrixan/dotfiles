@@ -105,6 +105,39 @@
     "obsidian-adrixan": {
       "type": "http",
       "url": "http://127.0.0.1:3940/mcp"
+    },
+    "lighthouse": {
+      "command": "/usr/local/bin/lighthouse-mcp-server"
+    },
+    "accessibility": {
+      "command": "/usr/local/bin/accessibility-scanner-mcp"
+    },
+    "docs": {
+      "type": "http",
+      "url": "http://127.0.0.1:6280/mcp"
+    },
+    "nasa": {
+      "command": "/usr/local/bin/nasa-mcp-server",
+      "env": {
+        "NASA_API_KEY": "${NASA_API_KEY:-DEMO_KEY}"
+      }
+    },
+    "open-meteo": {
+      "command": "/usr/local/bin/open-meteo-mcp-server"
+    },
+    "openroute": {
+      "command": "${HOME}/.local/bin/openroute-mcp",
+      "args": ["--data-folder", "${HOME}/Documents/Routes"],
+      "env": {
+        "OPENROUTESERVICE_API_KEY": "${OPENROUTESERVICE_API_KEY:-}"
+      }
+    },
+    "wikipedia": {
+      "command": "${HOME}/.local/bin/wikipedia-mcp",
+      "args": ["--language", "en"]
+    },
+    "searxng": {
+      "command": "/usr/local/bin/mcp-searxng"
     }
 {% endif %}
   }
