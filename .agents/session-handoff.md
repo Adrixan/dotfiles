@@ -87,3 +87,4 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 - Top picks: package-version-check-mcp, StacklokLabs/osv-mcp, `semgrep mcp` (built into semgrep; standalone repo archived), cyanheads/openalex-mcp-server, pho-research-tools, Excalidraw (yctimlin), drawio (lgazo), mcp-zap-server, MCPGoat/DVMCP labs, obsidian-hybrid-search.
 - Next: Peter picks servers; install via Ansible `ai_workstation` plus yadm templates for all three harnesses; run audits before pinning.
 - Gaps (build candidates): Austrian RIS, GeoSphere Austria, EAWS avalanche bulletins, ERIC, Typst compile.
+- 2026-10-21 (later): Tier 1 servers except ZAP and labs are installed and live (ansible `laptops` 42cccbc, 5874bb2; yadm master 44b3f02). Details in the ansible repo handoff.
