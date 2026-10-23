@@ -186,6 +186,26 @@
         "DDG_SAFE_SEARCH": "MODERATE"
       },
       "disabled": false
+    },
+    "ris-austria": {
+      "command": "/usr/local/bin/ris-austria-mcp-server",
+      "disabled": false
+    },
+    "eur-lex": {
+      "command": "/usr/local/bin/eur-lex-mcp-server",
+      "disabled": false
+    },
+    "youtube-transcript": {
+      "command": "{{ env.HOME }}/.local/bin/mcp-youtube-transcript",
+      "disabled": false
+    },
+    "oebb": {
+      "command": "{{ env.HOME }}/.local/bin/oebb-mcp-server",
+      "disabled": true
+    },
+    "thunderbird": {
+      "command": "/usr/local/bin/thunderbird-mcp",
+      "disabled": false
     }
 {% endif %}
 {% if env.OPENROUTESERVICE_API_KEY != "" %}

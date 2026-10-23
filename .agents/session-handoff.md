@@ -105,3 +105,6 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 - Done: three new backup scripts in `~/bin` (aufner.org, Zotero, AI harness state), local steps tested; Ph.D. vault pushed to a private GitHub repo after a clean gitleaks scan; `.config/yadm/encrypt` extended.
 - 2026-10-23 (later): new scripts scheduled in the nightly unit; Serena project memories added to the AI state backup; Claude Code IDE plugin in all three vaults; petersgasse.at feature branch pushed.
 - pcloud reconnected and the yadm archive re-encrypted with the new secrets (84b0573). Open for Peter: reload each vault in Obsidian once.
+
+## 2026-10-23: More MCP servers
+- RIS Austria, EUR-Lex, YouTube transcripts, ÖBB and Thunderbird added to all three harness templates (plugin 1.5.0; ansible `laptops`). Open for Peter: install the Thunderbird add-on from `/opt/mcp/thunderbird-mcp/` and restrict its accounts.
