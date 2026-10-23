@@ -1,1 +1,5 @@
 .mbsyncrc
+.config/ai/env
+.ssh/id_rsa
+.ssh/id_ed25519_vps
+.config/rclone/rclone.conf
