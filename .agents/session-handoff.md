@@ -103,4 +103,5 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 ## 2026-10-23: Backup and sync audit
 - Audit done and decisions recorded in the private knowledge map (`~/sync/ai/WORKSTATION.md`, section Backups); details stay out of this public repo.
 - Done: three new backup scripts in `~/bin` (aufner.org, Zotero, AI harness state), local steps tested; Ph.D. vault pushed to a private GitHub repo after a clean gitleaks scan; `.config/yadm/encrypt` extended.
-- Open for Peter: reconnect the pcloud remote, run `yadm encrypt` (then commit the encrypt list and archive), add the new scripts to the nightly unit.
+- 2026-10-23 (later): new scripts scheduled in the nightly unit; Serena project memories added to the AI state backup; Claude Code IDE plugin in all three vaults; petersgasse.at feature branch pushed.
+- Open for Peter: reconnect the pcloud remote, run `yadm encrypt` (then commit the encrypt list and archive), reload each vault in Obsidian once.
