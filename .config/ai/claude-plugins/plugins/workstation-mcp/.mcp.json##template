@@ -141,6 +141,21 @@
       "env": {
         "DDG_SAFE_SEARCH": "MODERATE"
       }
+    },
+    "ris-austria": {
+      "command": "/usr/local/bin/ris-austria-mcp-server"
+    },
+    "eur-lex": {
+      "command": "/usr/local/bin/eur-lex-mcp-server"
+    },
+    "youtube-transcript": {
+      "command": "${HOME}/.local/bin/mcp-youtube-transcript"
+    },
+    "oebb": {
+      "command": "${HOME}/.local/bin/oebb-mcp-server"
+    },
+    "thunderbird": {
+      "command": "/usr/local/bin/thunderbird-mcp"
     }
 {% endif %}
   }

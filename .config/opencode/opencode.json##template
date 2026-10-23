@@ -278,6 +278,37 @@
           "DDG_SAFE_SEARCH": "MODERATE"
         }
       },
+      "ris-austria": {
+        "type": "local",
+        "command": [
+          "/usr/local/bin/ris-austria-mcp-server"
+        ]
+      },
+      "eur-lex": {
+        "type": "local",
+        "command": [
+          "/usr/local/bin/eur-lex-mcp-server"
+        ]
+      },
+      "youtube-transcript": {
+        "type": "local",
+        "command": [
+          "{{ env.HOME }}/.local/bin/mcp-youtube-transcript"
+        ]
+      },
+      "oebb": {
+        "type": "local",
+        "command": [
+          "{{ env.HOME }}/.local/bin/oebb-mcp-server"
+        ],
+        "disabled": true
+      },
+      "thunderbird": {
+        "type": "local",
+        "command": [
+          "/usr/local/bin/thunderbird-mcp"
+        ]
+      },
 {% endif %}
 {% if env.OPENROUTESERVICE_API_KEY != "" %}
       "openroute": {
