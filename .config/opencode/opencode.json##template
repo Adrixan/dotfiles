@@ -269,11 +269,14 @@
         ],
         "disabled": true
       },
-      "searxng": {
+      "duckduckgo": {
         "type": "local",
         "command": [
-          "/usr/local/bin/mcp-searxng"
-        ]
+          "{{ env.HOME }}/.local/bin/duckduckgo-mcp-server"
+        ],
+        "environment": {
+          "DDG_SAFE_SEARCH": "MODERATE"
+        }
       },
 {% endif %}
 {% if env.OPENROUTESERVICE_API_KEY != "" %}

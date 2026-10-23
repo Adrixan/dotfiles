@@ -180,8 +180,11 @@
       ],
       "disabled": true
     },
-    "searxng": {
-      "command": "/usr/local/bin/mcp-searxng",
+    "duckduckgo": {
+      "command": "{{ env.HOME }}/.local/bin/duckduckgo-mcp-server",
+      "env": {
+        "DDG_SAFE_SEARCH": "MODERATE"
+      },
       "disabled": false
     }
 {% endif %}

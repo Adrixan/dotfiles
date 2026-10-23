@@ -136,8 +136,11 @@
       "command": "${HOME}/.local/bin/wikipedia-mcp",
       "args": ["--language", "en"]
     },
-    "searxng": {
-      "command": "/usr/local/bin/mcp-searxng"
+    "duckduckgo": {
+      "command": "${HOME}/.local/bin/duckduckgo-mcp-server",
+      "env": {
+        "DDG_SAFE_SEARCH": "MODERATE"
+      }
     }
 {% endif %}
   }
