@@ -206,6 +206,11 @@
     "thunderbird": {
       "command": "/usr/local/bin/thunderbird-mcp",
       "disabled": false
+    },
+    "trip-scout": {
+      "command": "{{ env.HOME }}/.local/bin/trip-scout",
+      "args": ["mcp"],
+      "disabled": false
     }
 {% endif %}
 {% if env.OPENROUTESERVICE_API_KEY != "" %}
