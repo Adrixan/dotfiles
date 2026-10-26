@@ -211,6 +211,11 @@
       "command": "{{ env.HOME }}/.local/bin/trip-scout",
       "args": ["mcp"],
       "disabled": false
+    },
+    "trip-planner": {
+      "command": "{{ env.HOME }}/.local/bin/trip-planner",
+      "args": ["mcp"],
+      "disabled": false
     }
 {% endif %}
 {% if env.OPENROUTESERVICE_API_KEY != "" %}

@@ -316,6 +316,13 @@
           "mcp"
         ]
       },
+      "trip-planner": {
+        "type": "local",
+        "command": [
+          "{{ env.HOME }}/.local/bin/trip-planner",
+          "mcp"
+        ]
+      },
 {% endif %}
 {% if env.OPENROUTESERVICE_API_KEY != "" %}
       "openroute": {
