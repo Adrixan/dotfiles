@@ -309,6 +309,13 @@
           "/usr/local/bin/thunderbird-mcp"
         ]
       },
+      "trip-scout": {
+        "type": "local",
+        "command": [
+          "{{ env.HOME }}/.local/bin/trip-scout",
+          "mcp"
+        ]
+      },
 {% endif %}
 {% if env.OPENROUTESERVICE_API_KEY != "" %}
       "openroute": {

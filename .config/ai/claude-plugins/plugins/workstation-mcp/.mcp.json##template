@@ -156,6 +156,10 @@
     },
     "thunderbird": {
       "command": "/usr/local/bin/thunderbird-mcp"
+    },
+    "trip-scout": {
+      "command": "${HOME}/.local/bin/trip-scout",
+      "args": ["mcp"]
     }
 {% endif %}
   }
