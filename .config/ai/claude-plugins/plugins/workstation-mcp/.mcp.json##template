@@ -160,6 +160,10 @@
     "trip-scout": {
       "command": "${HOME}/.local/bin/trip-scout",
       "args": ["mcp"]
+    },
+    "trip-planner": {
+      "command": "${HOME}/.local/bin/trip-planner",
+      "args": ["mcp"]
     }
 {% endif %}
   }
