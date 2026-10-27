@@ -215,6 +215,9 @@
     "trip-planner": {
       "command": "{{ env.HOME }}/.local/bin/trip-planner",
       "args": ["mcp"],
+      "env": {
+        "TRIP_PLANNER_TOKEN": "{{ env.TRIP_PLANNER_TOKEN }}"
+      },
       "disabled": false
     }
 {% endif %}
