@@ -1,6 +1,6 @@
 {
   "name": "workstation-mcp",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Unified MCP server set. Secrets resolve at runtime from ~/.config/ai/env; binaries come from the ansible ai_workstation role.",
   "author": {
     "name": "Peter Aufner"

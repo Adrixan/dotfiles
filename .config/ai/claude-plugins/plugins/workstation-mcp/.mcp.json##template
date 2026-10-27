@@ -163,7 +163,10 @@
     },
     "trip-planner": {
       "command": "${HOME}/.local/bin/trip-planner",
-      "args": ["mcp"]
+      "args": ["mcp"],
+      "env": {
+        "TRIP_PLANNER_TOKEN": "${TRIP_PLANNER_TOKEN:-}"
+      }
     }
 {% endif %}
   }

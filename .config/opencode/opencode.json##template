@@ -321,7 +321,10 @@
         "command": [
           "{{ env.HOME }}/.local/bin/trip-planner",
           "mcp"
-        ]
+        ],
+        "environment": {
+          "TRIP_PLANNER_TOKEN": "{{ env.TRIP_PLANNER_TOKEN }}"
+        }
       },
 {% endif %}
 {% if env.OPENROUTESERVICE_API_KEY != "" %}
