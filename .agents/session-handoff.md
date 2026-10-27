@@ -108,3 +108,16 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 
 ## 2026-10-23: More MCP servers
 - RIS Austria, EUR-Lex, YouTube transcripts, ÖBB and Thunderbird added to all three harness templates (plugin 1.5.0; ansible `laptops`). Open for Peter: install the Thunderbird add-on from `/opt/mcp/thunderbird-mcp/` and restrict its accounts.
+
+## 2026-10-24: Travel memory, ~/bin incident, memory-graph snapshots
+- MCP memory graph (`~/sync/ai/mcp-memory.jsonl`): new entities `Travel planning` (standing order), `Packing lists`, `Travel history`, persons `Peter Aufner`, `Julia`, `Solveig`, `Elenore`; pointer line "Travel" in `~/sync/ai/WORKSTATION.md`.
+- Incident: `~/bin` vanished on schulpc 2026-10-23 13:35 (cause unknown); Syncthing folder stopped with "folder path missing", peers kept the files; the 2026-10-24 02:00 `daily-cloud-sync` ran no script but reported success (`ExecStart=-`). Restored from m11x via `rsync -a m11x:bin/ ~/bin/`; Syncthing folder rescanned and back.
+- `~/bin/backup-ai-state.sh`: dated snapshots (keep 90, only on change, empty/invalid JSONL refused) of `mcp-memory.jsonl` and `WORKSTATION.md` in `/backup/ai-state/snapshots/`; restore steps in the script header and in WORKSTATION.md (Backups). Function unit-tested in the scratchpad; first real run 2026-10-24 wrote both snapshots.
+- Open: find the cause of the `~/bin` loss; failure alerting for `daily-cloud-sync` (an OnFailure unit or a check that the scripts exist) so a silent no-op night is noticed; pcloud token still revoked (`rclone config reconnect pcloud:`).
+
+## 2026-10-25: Music backup fix, music taste in memory
+- Music to OneDrive failed nightly on `DDRKirby(ISQ)/~Monthlies 2012.03~` (remote folder had a literal leading `~`; rclone encodes LeftTilde as `～`). Fixed by `rclone moveto --onedrive-encoding <default minus LeftTilde>` to the encoded name; dry run clean, 321 intended deletions (2.1 GiB) pending. The real sync was blocked by the auto-mode classifier: next nightly run applies it, or Peter runs it manually.
+- pcloud authenticates again but is extremely slow; the 2026-10-25 run hung for 5+ h in backup-code-alongside.sh (pcloud), delaying mail/aufner/zotero/ai-state. Open: add a time limit (`--max-duration` or `timeout`) to pcloud uploads (offered, not done).
+- Peter's confirmed music taste (local ~/Music only, Rammstein excluded, bardcore as a style) stored on `Peter Aufner`; Lord Of The Lost and Chris Harms on `Julia`; concert check added to `Travel planning`.
+- Done later 2026-10-25: `~/bin/lib/cloud-upload.sh` (parallel OneDrive + pcloud, pcloud time budget: sync_cloud 2 h, code-alongside 1 h, others 30 min, `SLOW_REMOTE_MAX_SECONDS`); all 7 upload scripts use it. Tested with a fake rclone (parallel run, budget skip, hard kill after budget + grace, failure propagation) and a real `backup-zotero.sh -n`. Files swapped in by `mv` because backup-code-alongside.sh was running.
+- Open: the 2026-10-25 run is still stuck in the OLD backup-code-alongside pcloud upload (PID 2506239); stopping it was blocked by the auto-mode classifier, Peter has to `kill` it so the later scripts run. Zotero backup has never reached either cloud yet.

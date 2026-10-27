@@ -1,7 +1,10 @@
 {
   "cleanupPeriodDays": 365,
-  "autoMemoryEnabled": false,
   "permissions": {
+    "deny": [
+      "mcp__plugin_workstation-mcp_excalidraw__export_to_excalidraw_url",
+      "mcp__plugin_workstation-mcp_wikipedia__wikipedia_*"
+    ],
     "ask": [
       "mcp__plugin_workstation-mcp_nextcloud__nc_mail_send_message",
       "mcp__plugin_workstation-mcp_nextcloud__talk_send_message",
@@ -11,10 +14,6 @@
       "mcp__plugin_workstation-mcp_nextcloud__*trash*",
       "mcp__plugin_workstation-mcp_github__merge_pull_request",
       "mcp__plugin_workstation-mcp_github__*delete*"
-    ],
-    "deny": [
-      "mcp__plugin_workstation-mcp_excalidraw__export_to_excalidraw_url",
-      "mcp__plugin_workstation-mcp_wikipedia__wikipedia_*"
     ],
     "defaultMode": "auto"
   },
@@ -39,6 +38,7 @@
       "effortLevel": "high"
     }
   },
+  "autoMemoryEnabled": false,
   "theme": "dark",
   "switchModelsOnFlag": true,
   "remoteControlAtStartup": true,
@@ -72,5 +72,6 @@
       "**Org-specific CLIs**: None configured",
       "**Routine under /home/Adrixan/Obsidian/Adrixan/Teaching/ prefix**: workspace scratch files belong in `.scratch/` per global CLAUDE.md convention; `.agents/` session-handoff state files are routine read/write locations"
     ]
-  }
+  },
+  "skipWorkflowUsageWarning": true
 }
