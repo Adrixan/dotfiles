@@ -61,7 +61,8 @@ project_dir() { echo "${PROJECTS_DIR}/$(conf_get "$1" RC_DIR | sed 's/[^A-Za-z0-
 
 last_active_min() {  # minutes since the newest transcript changed, or empty
     local newest
-    newest="$(find "$(project_dir "$1")" -maxdepth 1 -name '*.jsonl' -printf '%T@\n' 2>/dev/null | sort -n | tail -1)"
+    # Empty transcripts are standby sessions the server pre-created, not activity
+    newest="$(find "$(project_dir "$1")" -maxdepth 1 -name '*.jsonl' -size +0 -printf '%T@\n' 2>/dev/null | sort -n | tail -1)"
     [[ -n "$newest" ]] && echo $(( ( $(date +%s) - ${newest%.*} ) / 60 ))
     return 0
 }
