@@ -6,7 +6,7 @@
 # Workspace trust stays a manual step: `cd <folder> && claude` once and accept the dialog.
 # Usage:
 #   rc ls                                   roles with state, sessions, last activity, memory
-#   rc up <role> [--ttl 4h] [--fresh] [--force]
+#   rc up <role> [--ttl 4h] [--fresh] [--force]  resumes the last session (relay keeps it ~4 h after a stop)
 #   rc down <role> [--force]                refuses while a session was active in the last 15 min
 #   rc restart <role> [--force]
 #   rc new <name> [--label L] [--dir D] [--plugins dev,research,travel] [--brief TEXT]
@@ -135,6 +135,22 @@ fresh_pointer() {  # next start creates a new session instead of reattaching the
     fi
 }
 
+resume_info() {  # a restart reattaches the previous sessions for about 4 h after the stop (relay limit)
+    local role="$1" pointer stopped since hours
+    pointer="$(project_dir "$role")/bridge-pointer.json"
+    [[ -f "$pointer" ]] || { echo "no previous session: a new one starts"; return; }
+    # A stopped template instance is unloaded, so its timestamps are empty: take the journal's last stop
+    stopped="$(journalctl --user -u "$(unit "$role")" -o short-unix --no-pager --grep '^Stopped ' 2>/dev/null | tail -1 | cut -d' ' -f1)"
+    since="${stopped%.*}"
+    [[ "$since" =~ ^[0-9]+$ ]] || since="$(stat -c %Y "$pointer")"
+    hours=$(( ( $(date +%s) - since ) / 3600 ))
+    if [[ "$hours" -lt 4 ]]; then
+        echo "resuming the previous session ($(jq -r '.sessionId // "unknown"' "$pointer"), stopped ${hours} h ago)"
+    else
+        echo "previous session stopped ${hours} h ago, past the ~4 h reattach window: a new session starts and reads .agents/session-handoff.md"
+    fi
+}
+
 cmd_up() {
     local role ttl="" fresh=no force=no dir
     role="$(resolve "${1:?role missing}")"; shift
@@ -156,7 +172,7 @@ cmd_up() {
     if [[ "$force" != yes && "$(available_mb)" -lt "$MIN_AVAILABLE_MB" ]]; then
         die "only $(available_mb) MB RAM available (minimum ${MIN_AVAILABLE_MB}); stop a role or use --force"
     fi
-    [[ "$fresh" == yes ]] && fresh_pointer "$role"
+    if [[ "$fresh" == yes ]]; then fresh_pointer "$role"; else resume_info "$role"; fi
     systemctl --user start "$(unit "$role")"
     if [[ -n "$ttl" ]]; then
         systemctl --user stop "rc-ttl-${role}.timer" 2>/dev/null || true

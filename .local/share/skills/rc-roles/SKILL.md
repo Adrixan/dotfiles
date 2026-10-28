@@ -12,8 +12,10 @@ busy-session guards.
 
 ## Commands
 - `rc ls`: state, sessions, minutes since the last session activity, memory, plugins, description.
-- `rc up <role> [--ttl 3h] [--fresh] [--force]`: `--ttl` stops the role automatically; `--fresh` starts a
-  new session instead of resuming the last one; `--force` skips the RAM guard (1 GB available).
+- `rc up <role> [--ttl 3h] [--fresh] [--force]`: resumes the role's previous sessions by default (the relay
+  allows that for about 4 hours after the stop; later a new session starts and reads
+  `.agents/session-handoff.md`); `--ttl` stops the role automatically; `--fresh` starts a new session on
+  purpose; `--force` skips the RAM guard (1 GB available). Pass on the resume line `rc up` prints.
 - `rc down <role> [--force]` and `rc restart <role> [--force]`: refuse while a session was active in the
   last 15 minutes; `--force` ends those sessions.
 - `rc new <name> --label "…" --plugins dev,research,travel --brief "…" [--description "…"] [--args "--spawn worktree"]`:
@@ -26,6 +28,11 @@ busy-session guards.
   sessions, last activity, memory), then the stopped roles in one line, then free RAM.
 - Map Peter's words to role names: teacher, Lehrer → teaching; coding, dev → code; trip, Reise, travel
   planner → travel; Prof. Aufner, content → educator; deep research → research; Dissertation → phd.
+- Before `rc down` or `rc restart` of a role with sessions: find its session with `ListAgents` (the name
+  starts with the role folder's name), send it with `SendMessage` and `notify_when_idle: true`: "The
+  Greeter is stopping this role: update `.agents/session-handoff.md` (trajectory, intent, open decisions,
+  next steps), then stop." Stop the role after the idle notice. If no session is listed, or the notice
+  says it expired, stop anyway and say the handoff may be missing.
 - Never add `--force` on your own. When `rc` refuses (recent activity, low RAM), report why and ask.
 - Before `rc new`, settle in one question: name, label, plugins (suggest based on the purpose: code →
   dev; literature, law → research; trips → travel) and a two to four sentence brief that becomes the
