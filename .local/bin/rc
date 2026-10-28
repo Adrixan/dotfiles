@@ -13,6 +13,12 @@
 #          [--description TEXT] [--args "--spawn worktree"]
 #   rc rm <name> [--force]                  custom roles only; keeps the folder
 #   rc logs <role> [lines]
+#   rc trip <destination> [up options]      role trip-<slug> in ~/Obsidian/Adrixan/Travel/Trips/<slug>
+#                                           (created on first use, resumed later)
+#   rc trips                                trip roles, most recently active first
+#   rc projects                             folders in ~/code with git, trust and role state
+#   rc code <project> [up options]          role code-<project> for ~/code/<project>
+#   rc code --new <name> [up options]       creates ~/code/<name> with a minimal AGENTS.md first
 # <role> is the role name or its label (case-insensitive).
 # ==============================================================================
 
@@ -20,6 +26,8 @@ set -euo pipefail
 
 CONF_DIR="${HOME}/.config/claude-rc"
 ROLES_ROOT="${HOME}/Obsidian/Adrixan/AI/Roles"
+TRIPS_DIR="${HOME}/Obsidian/Adrixan/Travel/Trips"
+CODE_DIR="${HOME}/code"
 PROJECTS_DIR="${HOME}/.claude/projects"
 CLAUDE_STATE="${HOME}/.claude.json"
 MIN_AVAILABLE_MB=1024
@@ -209,9 +217,9 @@ safe_value() {  # values go into a systemd EnvironmentFile inside double quotes
 }
 
 cmd_new() {
-    local name="${1:?name missing}" label="" dir="" plugins="" brief="" description="" args="" p v enabled conf
+    local name="${1:?name missing}" label="" dir="" plugins="" brief="" description="" args="" files=yes p v enabled conf
     shift
-    [[ "$name" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || die "name: lowercase letters, digits and hyphens, 2 to 31 characters"
+    [[ "$name" =~ ^[a-z][a-z0-9-]{1,39}$ ]] || die "name: lowercase letters, digits and hyphens, 2 to 40 characters"
     [[ -e "${CONF_DIR}/${name}.conf" ]] && die "role $name exists"
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -221,6 +229,7 @@ cmd_new() {
             --brief) brief="$2"; shift 2 ;;
             --description) description="$2"; shift 2 ;;
             --args) args="$2"; shift 2 ;;
+            --no-files) files=no; shift ;;  # existing project: write nothing into its folder
             *) usage ;;
         esac
     done
@@ -230,28 +239,123 @@ cmd_new() {
         [[ " ${OPTIONAL_PLUGINS[*]} " == *" $p "* ]] || die "unknown plugin '$p' (dev, research, travel)"
     done
     dir="$(realpath -m -- "$dir")"
-    mkdir -p "$dir/.claude"
-    if [[ ! -e "$dir/AGENTS.md" ]]; then
-        printf '# %s\n\n%s\n' "$label" "${brief:-Custom role created with rc new.}" > "$dir/AGENTS.md"
-        printf '@AGENTS.md\n' > "$dir/CLAUDE.md"
+    if [[ "$files" == yes ]]; then
+        mkdir -p "$dir/.claude"
+        if [[ ! -e "$dir/AGENTS.md" ]]; then
+            printf '# %s\n\n%s\n' "$label" "${brief:-Custom role created with rc new.}" > "$dir/AGENTS.md"
+            printf '@AGENTS.md\n' > "$dir/CLAUDE.md"
+        fi
+        enabled="{}"
+        for p in "${OPTIONAL_PLUGINS[@]}"; do
+            if [[ ",${plugins}," == *",${p},"* ]]; then v=true; else v=false; fi
+            enabled="$(jq -c --arg k "workstation-$p@workstation" --argjson v "$v" '. + {($k): $v}' <<< "$enabled")"
+        done
+        if [[ -f "$dir/.claude/settings.json" ]]; then
+            jq --argjson e "$enabled" '.enabledPlugins = ((.enabledPlugins // {}) + $e)' "$dir/.claude/settings.json" > "$dir/.claude/settings.json.tmp"
+            mv -- "$dir/.claude/settings.json.tmp" "$dir/.claude/settings.json"
+        else
+            jq -n --argjson e "$enabled" '{enabledPlugins: $e}' > "$dir/.claude/settings.json"
+        fi
     fi
-    enabled="{}"
-    for p in "${OPTIONAL_PLUGINS[@]}"; do
-        if [[ ",${plugins}," == *",${p},"* ]]; then v=true; else v=false; fi
-        enabled="$(jq -c --arg k "workstation-$p@workstation" --argjson v "$v" '. + {($k): $v}' <<< "$enabled")"
-    done
-    if [[ -f "$dir/.claude/settings.json" ]]; then
-        jq --argjson e "$enabled" '.enabledPlugins = ((.enabledPlugins // {}) + $e)' "$dir/.claude/settings.json" > "$dir/.claude/settings.json.tmp"
-        mv -- "$dir/.claude/settings.json.tmp" "$dir/.claude/settings.json"
-    else
-        jq -n --argjson e "$enabled" '{enabledPlugins: $e}' > "$dir/.claude/settings.json"
-    fi
+    [[ -d "$dir" ]] || die "folder missing: $dir"
     conf="${CONF_DIR}/${name}.conf"
     printf '%s\nRC_DIR="%s"\nRC_NAME="%s"\nRC_ARGS="%s"\nRC_AUTOSTART="no"\nRC_DESCRIPTION="%s"\n' \
         "$CUSTOM_MARKER" "$dir" "$label" "$args" "$description" > "$conf"
-    echo "created role $name in $dir (plugins: core${plugins:+,$plugins})"
+    echo "created role $name in $dir (plugins: $([[ "$files" == yes ]] && echo "core${plugins:+,$plugins}" || echo "user defaults"))"
     is_trusted "$dir" || echo "not trusted yet: run 'cd \"$dir\" && claude' once in a terminal and accept the dialog"
-    echo "start it with: rc up $name"
+}
+
+slugify() {  # "Prague / Praha" -> prague-praha
+    iconv -f UTF-8 -t ASCII//TRANSLIT <<< "$1" 2>/dev/null | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-34
+}
+
+trip_brief() {  # AGENTS.md of a new trip role
+    cat <<EOF
+Trip planning role for $1, one of several trips planned in parallel (each trip has its own folder in
+\`~/Obsidian/Adrixan/Travel/Trips/\` and its own role \`trip-<slug>\`).
+
+- Follow the travel standing order: first read the memory entities \`Travel planning\`, \`Packing lists\`,
+  \`Travel history\`, \`Peter Aufner\`, \`Julia\`, \`Solveig\` and \`Elenore\`, and the Travel section of
+  \`~/sync/ai/WORKSTATION-details.md\`.
+- Keep this trip's state in this folder so a later session can restore it: \`trip.md\` (dates,
+  travellers, decisions, open questions, trip-planner slug) and \`.agents/session-handoff.md\`, both
+  updated after every planning step.
+- Publish through MCP \`trip-planner\` (one slug per trip; new documents start hidden), look things up
+  with \`trip-scout\`. Write German, "du" form, for the participants.
+EOF
+}
+
+cmd_trip() {
+    local dest="${1:?destination missing}" slug role
+    shift
+    slug="$(slugify "$dest")"
+    [[ -n "$slug" ]] || die "destination needs letters or digits: $dest"
+    role="trip-${slug}"
+    if [[ ! -e "${CONF_DIR}/${role}.conf" ]]; then
+        cmd_new "$role" --label "Trip ${dest}" --dir "${TRIPS_DIR}/${slug}" --plugins travel,research \
+            --description "Trip planning: ${dest}" --brief "$(trip_brief "$dest")"
+    fi
+    cmd_up "$role" "$@"
+}
+
+cmd_trips() {
+    local f role
+    compgen -G "${CONF_DIR}/trip-*.conf" >/dev/null || { echo "no trips yet: rc trip <destination>"; return; }
+    for f in "${CONF_DIR}"/trip-*.conf; do
+        role="$(basename "$f" .conf)"
+        printf '%s\t%s\t%s\t%s\n' "$(last_active_min "$role")" "$role" "$(conf_get "$role" RC_NAME)" \
+            "$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)"
+    done | sort -n | awk -F'\t' 'BEGIN{printf "%-26s %-22s %-9s %s\n","ROLE","LABEL","STATE","LAST_ACT"} {printf "%-26s %-22s %-9s %s\n",$2,$3,$4,($1==""?"-":$1"m")}'
+}
+
+code_role() { echo "code-$(slugify "$1")"; }
+
+cmd_projects() {
+    local d name act git trusted role state
+    for d in "${CODE_DIR}"/*/; do
+        d="${d%/}"; name="$(basename "$d")"
+        if [[ -e "$d/.git" ]]; then git=yes; else git=no; fi
+        # Last Claude session in the project (bulk commits across all repos make commit dates useless)
+        act="$(find "${PROJECTS_DIR}/$(sed 's/[^A-Za-z0-9]/-/g' <<< "$d")" -maxdepth 1 -name '*.jsonl' -size +0 -printf '%T@\n' 2>/dev/null | sort -n | tail -1 || true)"
+        act="${act%.*}"
+        [[ -n "$act" ]] || act="$(git -C "$d" log -1 --format=%ct 2>/dev/null || stat -c %Y "$d")"
+        is_trusted "$d" && trusted=yes || trusted=no
+        role="$(code_role "$name")"; state="-"
+        [[ -e "${CONF_DIR}/${role}.conf" ]] && state="$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$act" "$name" "$git" "$trusted" "$state"
+    done | sort -rn | awk -F'\t' -v now="$(date +%s)" \
+        'BEGIN{printf "%-36s %-4s %-7s %-9s %s\n","PROJECT","GIT","TRUSTED","ROLE","LAST_USED"} {printf "%-36s %-4s %-7s %-9s %dd\n",$2,$3,$4,$5,(now-$1)/86400}'
+    echo
+    echo "Start one with: rc code <project>   New project: rc code --new <name>"
+}
+
+cmd_code() {
+    local project="${1:?project missing}" dir role match=""
+    shift
+    if [[ "$project" == --new ]]; then
+        project="${1:?name missing}"; shift
+        [[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$ ]] || die "project name: letters, digits, dot, underscore, hyphen"
+        dir="${CODE_DIR}/${project}"
+        [[ -e "$dir" ]] && die "$dir exists: use rc code $project"
+        mkdir -p "$dir"
+        printf '# %s\n\nNew project created %s. Describe goal, stack and conventions here; the global rules apply.\n' \
+            "$project" "$(date +%F)" > "$dir/AGENTS.md"
+        printf '@AGENTS.md\n' > "$dir/CLAUDE.md"
+        echo "created $dir (no git yet: after \`git init\` the repository needs its own trust, 'cd \"$dir\" && claude')"
+    else
+        dir="${CODE_DIR}/${project}"
+        if [[ ! -d "$dir" ]]; then  # case-insensitive fallback: "linguafusion" -> LinguaFusion
+            match="$(find "$CODE_DIR" -mindepth 1 -maxdepth 1 -type d -iname "$project" -printf '%f\n' | head -1)"
+            [[ -n "$match" ]] || die "no project '$project' in $CODE_DIR (rc projects lists them)"
+            project="$match"; dir="${CODE_DIR}/${project}"
+        fi
+    fi
+    role="$(code_role "$project")"
+    if [[ ! -e "${CONF_DIR}/${role}.conf" ]]; then
+        cmd_new "$role" --label "Code: ${project}" --dir "$dir" --description "Code project ${project}" --no-files
+    fi
+    cmd_up "$role" "$@"
 }
 
 cmd_rm() {
@@ -278,8 +382,12 @@ case "${1:-ls}" in
     up|start) shift; cmd_up "$@" ;;
     down|stop) shift; cmd_down "$@" ;;
     restart) shift; cmd_restart "$@" ;;
-    new|create) shift; cmd_new "$@" ;;
+    new|create) shift; cmd_new "$@"; echo "start it with: rc up $1" ;;
     rm|remove) shift; cmd_rm "$@" ;;
     logs) shift; cmd_logs "$@" ;;
+    trip) shift; cmd_trip "$@" ;;
+    trips) cmd_trips ;;
+    projects) cmd_projects ;;
+    code) shift; cmd_code "$@" ;;
     *) usage ;;
 esac

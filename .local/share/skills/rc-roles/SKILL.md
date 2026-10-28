@@ -1,6 +1,6 @@
 ---
 name: rc-roles
-description: Start, stop, list and create Claude Code remote-control roles on schulpc (code, teaching, educator, research, phd, travel, greeter and custom roles) with the `rc` command. Use when Peter greets the Greeter session, asks which roles are running, wants a role started or stopped ("start teacher for 3 hours", "stop everything idle", "fresh code session"), or wants a new custom role.
+description: Start, stop, list and create Claude Code remote-control roles on schulpc (code, teaching, educator, research, phd, travel, greeter, one role per trip, one role per code project, and custom roles) with the `rc` command. Use when Peter greets the Greeter session, asks which roles are running, wants a role started or stopped ("start teacher for 3 hours", "stop everything idle", "fresh code session"), wants to plan a trip or resume one ("plan Berlin", "back to Prague"), wants to work on or create a code project, or wants a new custom role.
 ---
 
 # rc-roles
@@ -22,11 +22,20 @@ busy-session guards.
   creates `~/Obsidian/Adrixan/AI/Roles/<name>` with `AGENTS.md` (the brief) and plugin settings. The core
   plugin (GitHub, memory, fetch, Nextcloud, mail, docs) is always on.
 - `rc rm <name> [--force]` removes a custom role (the folder stays); `rc logs <role> [lines]`.
+- Trips, several in parallel: `rc trip <destination> [up options]` creates the role `trip-<slug>` on first
+  use (folder `~/Obsidian/Adrixan/Travel/Trips/<slug>` with the trip brief, travel and research plugins)
+  and starts or resumes it later; `rc trips` lists them. Each trip keeps `trip.md` and its handoff in its
+  folder, so it can be restored after any pause.
+- Code projects: `rc projects` lists every folder in `~/code` (git, trust, role state, last session);
+  `rc code <project>` creates and starts the role `code-<project>` (nothing is written into the repo);
+  `rc code --new <name>` creates `~/code/<name>` with a minimal `AGENTS.md` first. A git repository needs its
+  own trust before it can run as a role; until then the general `code` role covers it.
 
 ## How to act
 - On a greeting or "what's running": run `rc ls` and answer with a short menu: running roles first (label,
   sessions, last activity, memory), then the stopped roles in one line, then free RAM.
-- Map Peter's words to role names: teacher, Lehrer → teaching; coding, dev → code; trip, Reise, travel
+- Map Peter's words to role names, then check the name exists in the current `rc ls` (roles, trips and
+  code projects come and go): teacher, Lehrer → teaching; coding, dev → code; trip, Reise, travel
   planner → travel; Prof. Aufner, content → educator; deep research → research; Dissertation → phd.
 - Before `rc down` or `rc restart` of a role with sessions: find its session with `ListAgents` (the name
   starts with the role folder's name), send it with `SendMessage` and `notify_when_idle: true`: "The
