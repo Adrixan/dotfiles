@@ -1,0 +1,2 @@
+# Managed in yadm: resolve only distributions uploaded at least 24 hours ago (supply-chain cooldown)
+exclude-newer = "24 hours"

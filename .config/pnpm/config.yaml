@@ -1,0 +1,2 @@
+# Managed in yadm: install only releases published at least 24 hours ago (minutes; supply-chain cooldown)
+minimumReleaseAge: 1440
