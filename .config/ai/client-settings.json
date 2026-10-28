@@ -5,6 +5,9 @@
     { "serverName": "plugin:workstation-mcp:zotero" },
     { "serverName": "plugin:workstation-mcp:arxiv" },
     { "serverName": "plugin:workstation-mcp:serena" },
+    { "serverName": "plugin:workstation-research:zotero" },
+    { "serverName": "plugin:workstation-research:arxiv" },
+    { "serverName": "plugin:workstation-dev:serena" },
     { "serverName": "file-accountant" }
   ],
   "disableClaudeAiConnectors": true

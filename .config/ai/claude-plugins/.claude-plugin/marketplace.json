@@ -8,7 +8,22 @@
     {
       "name": "workstation-mcp",
       "source": "./plugins/workstation-mcp",
-      "description": "Unified MCP server set shared with Antigravity and OpenCode; binaries provisioned by the ansible ai_workstation role"
+      "description": "Core MCP servers shared with Antigravity and OpenCode (GitHub, memory, fetch, MarkItDown, Nextcloud, package versions, DuckDuckGo, Thunderbird, Grounded Docs)"
+    },
+    {
+      "name": "workstation-dev",
+      "source": "./plugins/workstation-dev",
+      "description": "Development MCP servers; switched off per directory in .claude/settings.json where no code is written"
+    },
+    {
+      "name": "workstation-research",
+      "source": "./plugins/workstation-research",
+      "description": "Research and law MCP servers (arXiv, Zotero, OpenAlex, Phở, Obsidian search, Wikipedia, YouTube, RIS, EUR-Lex, NASA)"
+    },
+    {
+      "name": "workstation-travel",
+      "source": "./plugins/workstation-travel",
+      "description": "Travel MCP servers (Open-Meteo, OpenRouteService, ÖBB, trip-scout, trip-planner)"
     }
   ]
 }

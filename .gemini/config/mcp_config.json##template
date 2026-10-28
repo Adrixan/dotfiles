@@ -23,6 +23,7 @@
       ],
       "disabled": false
     },
+{% if env.TERMUX_VERSION != "" %}
     "memory": {
       "command": "/usr/local/bin/mcp-server-memory",
       "env": {
@@ -34,14 +35,22 @@
       },
       "disabled": false
     },
+{% else %}
+    "memory": {"serverUrl": "http://127.0.0.1:8790/servers/memory/mcp", "disabled": false},
+{% endif %}
+{% if env.TERMUX_VERSION != "" %}
     "fetch": {
       "command": "{{ env.HOME }}/.local/bin/mcp-server-fetch",
       "disabled": false
     },
+{% else %}
+    "fetch": {"serverUrl": "http://127.0.0.1:8790/servers/fetch/mcp", "disabled": false},
+{% endif %}
     "git": {
       "command": "{{ env.HOME }}/.local/bin/mcp-server-git",
       "disabled": false
     },
+{% if env.TERMUX_VERSION != "" %}
     "arxiv": {
       "command": "{{ env.HOME }}/.local/bin/arxiv-mcp-server",
       "args": [
@@ -50,6 +59,10 @@
       ],
       "disabled": false
     },
+{% else %}
+    "arxiv": {"serverUrl": "http://127.0.0.1:8790/servers/arxiv/mcp", "disabled": false},
+{% endif %}
+{% if env.TERMUX_VERSION != "" %}
     "zotero": {
       "command": "{{ env.HOME }}/.local/bin/zotero-mcp",
       "env": {
@@ -57,10 +70,17 @@
       },
       "disabled": false
     },
+{% else %}
+    "zotero": {"serverUrl": "http://127.0.0.1:8790/servers/zotero/mcp", "disabled": false},
+{% endif %}
+{% if env.TERMUX_VERSION != "" %}
     "markitdown": {
       "command": "{{ env.HOME }}/.local/bin/markitdown-mcp",
       "disabled": false
     },
+{% else %}
+    "markitdown": {"serverUrl": "http://127.0.0.1:8790/servers/markitdown/mcp", "disabled": false},
+{% endif %}
     "serena": {
       "command": "{{ env.HOME }}/.local/bin/serena",
       "args": [
@@ -72,6 +92,7 @@
       ],
       "disabled": false
     },
+{% if env.TERMUX_VERSION != "" %}
     "nextcloud": {
       "command": "{{ env.HOME }}/.local/bin/nextcloud-mcp-server",
       "args": [
@@ -86,6 +107,10 @@
       },
       "disabled": false
     },
+{% else %}
+    "nextcloud": {"serverUrl": "http://127.0.0.1:8790/servers/nextcloud/mcp", "disabled": false},
+{% endif %}
+{% if env.TERMUX_VERSION != "" %}
     "docker": {
       "command": "{{ env.HOME }}/.local/bin/mcp-server-docker",
       "env": {
@@ -93,15 +118,12 @@
       },
       "disabled": false
     }
+{% else %}
+    "docker": {"serverUrl": "http://127.0.0.1:8790/servers/docker/mcp", "disabled": false}
+{% endif %}
 {% if env.TERMUX_VERSION == "" %}
     ,
-    "package-versions": {
-      "command": "{{ env.HOME }}/.local/bin/package-version-check-mcp",
-      "args": [
-        "--mode=stdio"
-      ],
-      "disabled": false
-    },
+    "package-versions": {"serverUrl": "http://127.0.0.1:8790/servers/package-versions/mcp", "disabled": false},
     "osv": {
       "command": "/usr/bin/osv-scanner",
       "args": [
@@ -121,26 +143,13 @@
       },
       "disabled": false
     },
-    "openalex": {
-      "command": "/usr/local/bin/openalex-mcp-server",
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "error"
-      },
-      "disabled": false
-    },
+    "openalex": {"serverUrl": "http://127.0.0.1:8790/servers/openalex/mcp", "disabled": false},
     "pho-research": {
       "serverUrl": "http://127.0.0.1:8787/mcp",
       "disabled": false
     },
-    "excalidraw": {
-      "command": "/usr/local/bin/mcp-excalidraw-server",
-      "disabled": true
-    },
-    "drawio": {
-      "command": "/usr/local/bin/drawio-mcp",
-      "disabled": false
-    },
+    "excalidraw": {"serverUrl": "http://127.0.0.1:8790/servers/excalidraw/mcp", "disabled": true},
+    "drawio": {"serverUrl": "http://127.0.0.1:8790/servers/drawio/mcp", "disabled": false},
     "obsidian-phd": {
       "serverUrl": "http://127.0.0.1:3939/mcp",
       "disabled": false
@@ -149,91 +158,27 @@
       "serverUrl": "http://127.0.0.1:3940/mcp",
       "disabled": false
     },
-    "lighthouse": {
-      "command": "/usr/local/bin/lighthouse-mcp-server",
-      "disabled": true
-    },
-    "accessibility": {
-      "command": "/usr/local/bin/accessibility-scanner-mcp",
-      "disabled": false
-    },
+    "lighthouse": {"serverUrl": "http://127.0.0.1:8790/servers/lighthouse/mcp", "disabled": true},
+    "accessibility": {"serverUrl": "http://127.0.0.1:8790/servers/accessibility/mcp", "disabled": false},
     "docs": {
       "serverUrl": "http://127.0.0.1:6280/mcp",
       "disabled": false
     },
-    "nasa": {
-      "command": "/usr/local/bin/nasa-mcp-server",
-      "env": {
-        "NASA_API_KEY": "DEMO_KEY"
-      },
-      "disabled": true
-    },
-    "open-meteo": {
-      "command": "/usr/local/bin/open-meteo-mcp-server",
-      "disabled": true
-    },
-    "wikipedia": {
-      "command": "{{ env.HOME }}/.local/bin/wikipedia-mcp",
-      "args": [
-        "--language",
-        "en"
-      ],
-      "disabled": true
-    },
-    "duckduckgo": {
-      "command": "{{ env.HOME }}/.local/bin/duckduckgo-mcp-server",
-      "env": {
-        "DDG_SAFE_SEARCH": "MODERATE"
-      },
-      "disabled": false
-    },
-    "ris-austria": {
-      "command": "/usr/local/bin/ris-austria-mcp-server",
-      "disabled": false
-    },
-    "eur-lex": {
-      "command": "/usr/local/bin/eur-lex-mcp-server",
-      "disabled": false
-    },
-    "youtube-transcript": {
-      "command": "{{ env.HOME }}/.local/bin/mcp-youtube-transcript",
-      "disabled": false
-    },
-    "oebb": {
-      "command": "{{ env.HOME }}/.local/bin/oebb-mcp-server",
-      "disabled": true
-    },
-    "thunderbird": {
-      "command": "/usr/local/bin/thunderbird-mcp",
-      "disabled": false
-    },
-    "trip-scout": {
-      "command": "{{ env.HOME }}/.local/bin/trip-scout",
-      "args": ["mcp"],
-      "disabled": false
-    },
-    "trip-planner": {
-      "command": "{{ env.HOME }}/.local/bin/trip-planner",
-      "args": ["mcp"],
-      "env": {
-        "TRIP_PLANNER_TOKEN": "{{ env.TRIP_PLANNER_TOKEN }}"
-      },
-      "disabled": false
-    }
+    "nasa": {"serverUrl": "http://127.0.0.1:8790/servers/nasa/mcp", "disabled": true},
+    "open-meteo": {"serverUrl": "http://127.0.0.1:8790/servers/open-meteo/mcp", "disabled": true},
+    "wikipedia": {"serverUrl": "http://127.0.0.1:8790/servers/wikipedia/mcp", "disabled": true},
+    "duckduckgo": {"serverUrl": "http://127.0.0.1:8790/servers/duckduckgo/mcp", "disabled": false},
+    "ris-austria": {"serverUrl": "http://127.0.0.1:8790/servers/ris-austria/mcp", "disabled": false},
+    "eur-lex": {"serverUrl": "http://127.0.0.1:8790/servers/eur-lex/mcp", "disabled": false},
+    "youtube-transcript": {"serverUrl": "http://127.0.0.1:8790/servers/youtube-transcript/mcp", "disabled": false},
+    "oebb": {"serverUrl": "http://127.0.0.1:8790/servers/oebb/mcp", "disabled": true},
+    "thunderbird": {"serverUrl": "http://127.0.0.1:8790/servers/thunderbird/mcp", "disabled": false},
+    "trip-scout": {"serverUrl": "http://127.0.0.1:8790/servers/trip-scout/mcp", "disabled": false},
+    "trip-planner": {"serverUrl": "http://127.0.0.1:8790/servers/trip-planner/mcp", "disabled": false}
 {% endif %}
 {% if env.OPENROUTESERVICE_API_KEY != "" %}
     ,
-    "openroute": {
-      "command": "{{ env.HOME }}/.local/bin/openroute-mcp",
-      "args": [
-        "--data-folder",
-        "{{ env.HOME }}/Documents/Routes"
-      ],
-      "env": {
-        "OPENROUTESERVICE_API_KEY": "{{ env.OPENROUTESERVICE_API_KEY }}"
-      },
-      "disabled": false
-    }
+    "openroute": {"serverUrl": "http://127.0.0.1:8790/servers/openroute/mcp", "disabled": false}
 {% endif %}
   }
 }

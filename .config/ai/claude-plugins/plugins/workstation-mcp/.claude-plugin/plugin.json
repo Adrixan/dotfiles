@@ -1,7 +1,7 @@
 {
   "name": "workstation-mcp",
-  "version": "1.7.1",
-  "description": "Unified MCP server set. Secrets resolve at runtime from ~/.config/ai/env; binaries come from the ansible ai_workstation role.",
+  "version": "2.0.0",
+  "description": "Core MCP servers: GitHub, memory, fetch, MarkItDown, Nextcloud, package versions, DuckDuckGo, Thunderbird, Grounded Docs. Stateless servers come from the shared loopback service (ansible ai_workstation, mcp-shared.service); secrets resolve from ~/.config/ai/env.",
   "author": {
     "name": "Peter Aufner"
   }

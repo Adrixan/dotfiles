@@ -1,0 +1,8 @@
+{
+  "name": "workstation-travel",
+  "version": "1.0.0",
+  "description": "Travel servers: Open-Meteo, OpenRouteService, ÖBB, trip-scout, trip-planner (shared loopback service). Binaries and services come from the ansible ai_workstation role.",
+  "author": {
+    "name": "Peter Aufner"
+  }
+}

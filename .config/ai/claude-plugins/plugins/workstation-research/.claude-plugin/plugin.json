@@ -1,0 +1,8 @@
+{
+  "name": "workstation-research",
+  "version": "1.0.0",
+  "description": "Research servers: arXiv, Zotero, OpenAlex, Phở, Obsidian search, Wikipedia, YouTube transcripts, RIS, EUR-Lex, NASA (shared loopback services). Binaries and services come from the ansible ai_workstation role.",
+  "author": {
+    "name": "Peter Aufner"
+  }
+}

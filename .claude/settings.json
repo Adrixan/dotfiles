@@ -3,7 +3,9 @@
   "permissions": {
     "deny": [
       "mcp__plugin_workstation-mcp_excalidraw__export_to_excalidraw_url",
-      "mcp__plugin_workstation-mcp_wikipedia__wikipedia_*"
+      "mcp__plugin_workstation-mcp_wikipedia__wikipedia_*",
+      "mcp__plugin_workstation-dev_excalidraw__export_to_excalidraw_url",
+      "mcp__plugin_workstation-research_wikipedia__wikipedia_*"
     ],
     "ask": [
       "mcp__plugin_workstation-mcp_nextcloud__nc_mail_send_message",
@@ -20,7 +22,10 @@
   "enableWorkflows": true,
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": true,
-    "workstation-mcp@workstation": true
+    "workstation-mcp@workstation": true,
+    "workstation-dev@workstation": true,
+    "workstation-research@workstation": true,
+    "workstation-travel@workstation": true
   },
   "extraKnownMarketplaces": {
     "workstation": {
@@ -39,6 +44,7 @@
     }
   },
   "autoMemoryEnabled": false,
+  "skipWorkflowUsageWarning": true,
   "theme": "dark",
   "switchModelsOnFlag": true,
   "remoteControlAtStartup": true,
@@ -72,6 +78,5 @@
       "**Org-specific CLIs**: None configured",
       "**Routine under /home/Adrixan/Obsidian/Adrixan/Teaching/ prefix**: workspace scratch files belong in `.scratch/` per global CLAUDE.md convention; `.agents/` session-handoff state files are routine read/write locations"
     ]
-  },
-  "skipWorkflowUsageWarning": true
+  }
 }

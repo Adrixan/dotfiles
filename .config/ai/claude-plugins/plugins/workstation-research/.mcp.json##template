@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+{% if env.TERMUX_VERSION != "" %}
+    "arxiv": {
+      "command": "${HOME}/.local/bin/arxiv-mcp-server",
+      "args": ["--storage-path", "${HOME}/Obsidian/Ph.D./Papers/arxiv"]
+    },
+    "zotero": {
+      "command": "${HOME}/.local/bin/zotero-mcp",
+      "env": {
+        "ZOTERO_LOCAL": "true"
+      }
+    }
+{% else %}
+    "arxiv": { "type": "http", "url": "http://127.0.0.1:8790/servers/arxiv/mcp" },
+    "zotero": { "type": "http", "url": "http://127.0.0.1:8790/servers/zotero/mcp" },
+    "openalex": { "type": "http", "url": "http://127.0.0.1:8790/servers/openalex/mcp" },
+    "pho-research": { "type": "http", "url": "http://127.0.0.1:8787/mcp" },
+    "obsidian-phd": { "type": "http", "url": "http://127.0.0.1:3939/mcp" },
+    "obsidian-adrixan": { "type": "http", "url": "http://127.0.0.1:3940/mcp" },
+    "wikipedia": { "type": "http", "url": "http://127.0.0.1:8790/servers/wikipedia/mcp" },
+    "youtube-transcript": { "type": "http", "url": "http://127.0.0.1:8790/servers/youtube-transcript/mcp" },
+    "ris-austria": { "type": "http", "url": "http://127.0.0.1:8790/servers/ris-austria/mcp" },
+    "eur-lex": { "type": "http", "url": "http://127.0.0.1:8790/servers/eur-lex/mcp" },
+    "nasa": { "type": "http", "url": "http://127.0.0.1:8790/servers/nasa/mcp" }
+{% endif %}
+  }
+}

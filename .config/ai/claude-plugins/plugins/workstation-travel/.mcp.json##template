@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+{% if env.TERMUX_VERSION == "" %}
+    "open-meteo": { "type": "http", "url": "http://127.0.0.1:8790/servers/open-meteo/mcp" },
+    "openroute": { "type": "http", "url": "http://127.0.0.1:8790/servers/openroute/mcp" },
+    "oebb": { "type": "http", "url": "http://127.0.0.1:8790/servers/oebb/mcp" },
+    "trip-scout": { "type": "http", "url": "http://127.0.0.1:8790/servers/trip-scout/mcp" },
+    "trip-planner": { "type": "http", "url": "http://127.0.0.1:8790/servers/trip-planner/mcp" }
+{% endif %}
+  }
+}
