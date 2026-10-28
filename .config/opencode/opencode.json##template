@@ -175,20 +175,8 @@
       "docker": {"type": "remote", "url": "http://127.0.0.1:8790/servers/docker/mcp", "oauth": false, "disabled": false},
 {% endif %}
 {% if env.TERMUX_VERSION == "" %}
-      "ptsd": {
-        "type": "local",
-        "command": [
-          "/usr/bin/node",
-          "{{ env.HOME }}/code/PTSD/mcp/dist/server.mjs"
-        ]
-      },
-      "file-accountant": {
-        "type": "local",
-        "command": [
-          "{{ env.HOME }}/.local/bin/fa",
-          "mcp"
-        ]
-      },
+      "ptsd": {"type": "remote", "url": "http://127.0.0.1:8790/servers/ptsd/mcp", "oauth": false},
+      "file-accountant": {"type": "remote", "url": "http://127.0.0.1:8790/servers/file-accountant/mcp", "oauth": false},
       "package-versions": {"type": "remote", "url": "http://127.0.0.1:8790/servers/package-versions/mcp", "oauth": false},
       "osv": {
         "type": "local",

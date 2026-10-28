@@ -8,7 +8,8 @@
     { "serverName": "plugin:workstation-research:zotero" },
     { "serverName": "plugin:workstation-research:arxiv" },
     { "serverName": "plugin:workstation-dev:serena" },
-    { "serverName": "file-accountant" }
+    { "serverName": "file-accountant" },
+    { "serverName": "ptsd" }
   ],
   "disableClaudeAiConnectors": true
 }
