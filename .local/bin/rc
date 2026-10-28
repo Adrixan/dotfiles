@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# rc: manage Claude Code remote-control roles (one claude-remote-control@<role> user unit each)
+# Roles: ~/.config/claude-rc/<role>.conf (predefined ones from Ansible ai_workstation, custom ones
+# from `rc new`, folders in ~/Obsidian/Adrixan/AI/Roles). Only the greeter starts at boot.
+# Workspace trust stays a manual step: `cd <folder> && claude` once and accept the dialog.
+# Usage:
+#   rc ls                                   roles with state, sessions, last activity, memory
+#   rc up <role> [--ttl 4h] [--fresh] [--force]
+#   rc down <role> [--force]                refuses while a session was active in the last 15 min
+#   rc restart <role> [--force]
+#   rc new <name> [--label L] [--dir D] [--plugins dev,research,travel] [--brief TEXT]
+#          [--description TEXT] [--args "--spawn worktree"]
+#   rc rm <name> [--force]                  custom roles only; keeps the folder
+#   rc logs <role> [lines]
+# <role> is the role name or its label (case-insensitive).
+# ==============================================================================
+
+set -euo pipefail
+
+CONF_DIR="${HOME}/.config/claude-rc"
+ROLES_ROOT="${HOME}/Obsidian/Adrixan/AI/Roles"
+PROJECTS_DIR="${HOME}/.claude/projects"
+CLAUDE_STATE="${HOME}/.claude.json"
+MIN_AVAILABLE_MB=1024
+BUSY_MINUTES=15
+CUSTOM_MARKER="# Created by rc new"
+OPTIONAL_PLUGINS=(dev research travel)
+
+die() { echo "rc: $*" >&2; exit 1; }
+unit() { echo "claude-remote-control@$1.service"; }
+
+usage() {
+    sed -n '/^# Usage:/,/^# <role>/p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+}
+
+conf_get() {  # conf_get <role> <KEY>
+    sed -n "s/^$2=\"\(.*\)\"\$/\1/p" "${CONF_DIR}/$1.conf"
+}
+
+resolve() {  # role name or label -> role name
+    local want="${1,,}" f name
+    [[ -f "${CONF_DIR}/${want}.conf" ]] && { echo "$want"; return; }
+    for f in "${CONF_DIR}"/*.conf; do
+        name="$(basename "$f" .conf)"
+        [[ "$(conf_get "$name" RC_NAME | tr '[:upper:]' '[:lower:]')" == "$want" ]] && { echo "$name"; return; }
+    done
+    die "unknown role '$1' (rc ls lists them)"
+}
+
+main_pid() { systemctl --user show -p MainPID --value "$(unit "$1")"; }
+
+sessions() {  # one `claude --print --sdk-url` child per session
+    local pid; pid="$(main_pid "$1")"
+    [[ "$pid" != 0 ]] || { echo 0; return; }
+    pgrep -P "$pid" -f -- '--sdk-url' | wc -l
+}
+
+project_dir() { echo "${PROJECTS_DIR}/$(conf_get "$1" RC_DIR | sed 's/[^A-Za-z0-9]/-/g')"; }
+
+last_active_min() {  # minutes since the newest transcript changed, or empty
+    local newest
+    newest="$(find "$(project_dir "$1")" -maxdepth 1 -name '*.jsonl' -printf '%T@\n' 2>/dev/null | sort -n | tail -1)"
+    [[ -n "$newest" ]] && echo $(( ( $(date +%s) - ${newest%.*} ) / 60 ))
+    return 0
+}
+
+memory_mb() {  # resident memory of every process in the unit's cgroup
+    local cg kb=0 p
+    cg="$(systemctl --user show -p ControlGroup --value "$(unit "$1")")"
+    [[ -n "$cg" && -r "/sys/fs/cgroup${cg}/cgroup.procs" ]] || { echo 0; return; }
+    while read -r p; do
+        kb=$(( kb + $(awk '/^VmRSS/{print $2}' "/proc/$p/status" 2>/dev/null || echo 0) ))
+    done < "/sys/fs/cgroup${cg}/cgroup.procs"
+    echo $(( kb / 1024 ))
+}
+
+plugins_off() {  # optional plugins switched off in the role folder
+    local settings off=() p
+    settings="$(conf_get "$1" RC_DIR)/.claude/settings.json"
+    [[ -r "$settings" ]] || { echo "all"; return; }
+    [[ "$(jq -r '.enabledPlugins["workstation-mcp@workstation"] == false' "$settings")" == true ]] && { echo "none"; return; }
+    for p in "${OPTIONAL_PLUGINS[@]}"; do
+        [[ "$(jq -r --arg k "workstation-$p@workstation" '.enabledPlugins[$k] == false' "$settings")" == true ]] && off+=("$p")
+    done
+    if [[ ${#off[@]} -gt 0 ]]; then (IFS=,; echo "no ${off[*]}"); else echo "all"; fi
+}
+
+is_trusted() {  # the folder, or for a non-git folder an ancestor, has accepted workspace trust
+    local dir="$1" top
+    top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$top" ]] && dir="$top"
+    jq -e --arg d "$dir" '.projects[$d].hasTrustDialogAccepted == true' "$CLAUDE_STATE" >/dev/null && return 0
+    [[ -n "$top" ]] && return 1  # a nested repository needs its own trust
+    while dir="$(dirname "$dir")"; [[ "$dir" != "$HOME" && "$dir" != / ]]; do
+        jq -e --arg d "$dir" '.projects[$d].hasTrustDialogAccepted == true' "$CLAUDE_STATE" >/dev/null && return 0
+    done
+    return 1  # home-directory trust is never saved, so the walk stops below it
+}
+
+available_mb() { awk '/^MemAvailable/{print int($2/1024)}' /proc/meminfo; }
+
+busy_guard() {  # refuse to end sessions that were active recently
+    local role="$1" force="$2" idle
+    [[ "$force" == yes ]] && return 0
+    idle="$(last_active_min "$role")"
+    if [[ -n "$idle" && "$idle" -lt "$BUSY_MINUTES" && "$(sessions "$role")" -gt 0 ]]; then
+        die "$role had session activity ${idle} min ago; this ends its sessions (use --force)"
+    fi
+}
+
+cmd_ls() {
+    local f role state sess idle mem
+    printf '%-10s %-15s %-9s %-4s %-8s %-6s %-16s %s\n' ROLE LABEL STATE SESS LAST_ACT MEM_MB PLUGINS DESCRIPTION
+    for f in "${CONF_DIR}"/*.conf; do
+        role="$(basename "$f" .conf)"
+        state="$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)"
+        [[ "$(conf_get "$role" RC_AUTOSTART)" == yes ]] && state="${state}*"
+        sess="-"; mem="-"; idle="$(last_active_min "$role")"
+        if [[ "$state" == active* ]]; then sess="$(sessions "$role")"; mem="$(memory_mb "$role")"; fi
+        printf '%-10s %-15s %-9s %-4s %-8s %-6s %-16s %s%s\n' "$role" "$(conf_get "$role" RC_NAME)" "$state" "$sess" \
+            "${idle:+${idle}m}" "$mem" "$(plugins_off "$role")" "$(conf_get "$role" RC_DESCRIPTION)" \
+            "$(grep -qxF "$CUSTOM_MARKER" "$f" && echo ' [custom]' || true)"
+    done
+    echo
+    echo "* starts at boot. RAM available: $(available_mb) MB. Shared MCP service: $(systemctl --user is-active mcp-shared.service 2>/dev/null || true)"
+}
+
+fresh_pointer() {  # next start creates a new session instead of reattaching the last one
+    local pointer; pointer="$(project_dir "$1")/bridge-pointer.json"
+    if [[ -f "$pointer" ]]; then
+        mv -- "$pointer" "${pointer}.$(date +%Y%m%d%H%M%S).bak"
+        echo "fresh session for $1"
+    fi
+}
+
+cmd_up() {
+    local role ttl="" fresh=no force=no dir
+    role="$(resolve "${1:?role missing}")"; shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --ttl) ttl="${2:?--ttl needs a duration such as 4h}"; shift 2 ;;
+            --fresh) fresh=yes; shift ;;
+            --force) force=yes; shift ;;
+            *) usage ;;
+        esac
+    done
+    if systemctl --user is-active --quiet "$(unit "$role")"; then
+        echo "$role is already running ($(sessions "$role") sessions)"
+        return
+    fi
+    dir="$(conf_get "$role" RC_DIR)"
+    [[ -d "$dir" ]] || die "folder missing: $dir"
+    is_trusted "$dir" || die "$dir is not trusted: run 'cd \"$dir\" && claude' once in a terminal and accept the dialog"
+    if [[ "$force" != yes && "$(available_mb)" -lt "$MIN_AVAILABLE_MB" ]]; then
+        die "only $(available_mb) MB RAM available (minimum ${MIN_AVAILABLE_MB}); stop a role or use --force"
+    fi
+    [[ "$fresh" == yes ]] && fresh_pointer "$role"
+    systemctl --user start "$(unit "$role")"
+    if [[ -n "$ttl" ]]; then
+        systemctl --user stop "rc-ttl-${role}.timer" 2>/dev/null || true
+        systemd-run --user --quiet --unit "rc-ttl-${role}" --on-active="$ttl" --timer-property=AccuracySec=1min \
+            /usr/bin/systemctl --user stop "$(unit "$role")"
+        echo "auto-stop in $ttl"
+    fi
+    echo "started $role: open the session \"$(conf_get "$role" RC_NAME)\" in the Claude app (appears within about 30 s)"
+}
+
+cmd_down() {
+    local role force=no
+    role="$(resolve "${1:?role missing}")"; shift
+    [[ "${1:-}" == --force ]] && force=yes
+    systemctl --user is-active --quiet "$(unit "$role")" || { echo "$role is not running"; return; }
+    busy_guard "$role" "$force"
+    systemctl --user stop "$(unit "$role")"
+    systemctl --user stop "rc-ttl-${role}.timer" 2>/dev/null || true
+    echo "stopped $role (starting it again works after about 1 to 2 min)"
+}
+
+cmd_restart() {
+    local role force=no
+    role="$(resolve "${1:?role missing}")"; shift
+    [[ "${1:-}" == --force ]] && force=yes
+    busy_guard "$role" "$force"
+    systemctl --user restart "$(unit "$role")"
+    echo "restarted $role (the unit retries for about 1 to 2 min until the relay accepts it)"
+}
+
+safe_value() {  # values go into a systemd EnvironmentFile inside double quotes
+    [[ "$1" != *[\"\$\`\\]* && "$1" != *$'\n'* ]] || die "value must not contain quotes, \$, backticks, backslashes or newlines: $1"
+}
+
+cmd_new() {
+    local name="${1:?name missing}" label="" dir="" plugins="" brief="" description="" args="" p v enabled conf
+    shift
+    [[ "$name" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || die "name: lowercase letters, digits and hyphens, 2 to 31 characters"
+    [[ -e "${CONF_DIR}/${name}.conf" ]] && die "role $name exists"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --label) label="$2"; shift 2 ;;
+            --dir) dir="$2"; shift 2 ;;
+            --plugins) plugins="$2"; shift 2 ;;
+            --brief) brief="$2"; shift 2 ;;
+            --description) description="$2"; shift 2 ;;
+            --args) args="$2"; shift 2 ;;
+            *) usage ;;
+        esac
+    done
+    label="${label:-${name^}}"; dir="${dir:-${ROLES_ROOT}/${name}}"; description="${description:-${brief%%.*}}"
+    for p in "$label" "$dir" "$description" "$args"; do safe_value "$p"; done
+    for p in ${plugins//,/ }; do
+        [[ " ${OPTIONAL_PLUGINS[*]} " == *" $p "* ]] || die "unknown plugin '$p' (dev, research, travel)"
+    done
+    dir="$(realpath -m -- "$dir")"
+    mkdir -p "$dir/.claude"
+    if [[ ! -e "$dir/AGENTS.md" ]]; then
+        printf '# %s\n\n%s\n' "$label" "${brief:-Custom role created with rc new.}" > "$dir/AGENTS.md"
+        printf '@AGENTS.md\n' > "$dir/CLAUDE.md"
+    fi
+    enabled="{}"
+    for p in "${OPTIONAL_PLUGINS[@]}"; do
+        if [[ ",${plugins}," == *",${p},"* ]]; then v=true; else v=false; fi
+        enabled="$(jq -c --arg k "workstation-$p@workstation" --argjson v "$v" '. + {($k): $v}' <<< "$enabled")"
+    done
+    if [[ -f "$dir/.claude/settings.json" ]]; then
+        jq --argjson e "$enabled" '.enabledPlugins = ((.enabledPlugins // {}) + $e)' "$dir/.claude/settings.json" > "$dir/.claude/settings.json.tmp"
+        mv -- "$dir/.claude/settings.json.tmp" "$dir/.claude/settings.json"
+    else
+        jq -n --argjson e "$enabled" '{enabledPlugins: $e}' > "$dir/.claude/settings.json"
+    fi
+    conf="${CONF_DIR}/${name}.conf"
+    printf '%s\nRC_DIR="%s"\nRC_NAME="%s"\nRC_ARGS="%s"\nRC_AUTOSTART="no"\nRC_DESCRIPTION="%s"\n' \
+        "$CUSTOM_MARKER" "$dir" "$label" "$args" "$description" > "$conf"
+    echo "created role $name in $dir (plugins: core${plugins:+,$plugins})"
+    is_trusted "$dir" || echo "not trusted yet: run 'cd \"$dir\" && claude' once in a terminal and accept the dialog"
+    echo "start it with: rc up $name"
+}
+
+cmd_rm() {
+    local role force=no
+    role="$(resolve "${1:?role missing}")"; shift
+    [[ "${1:-}" == --force ]] && force=yes
+    grep -qxF "$CUSTOM_MARKER" "${CONF_DIR}/${role}.conf" || die "$role is predefined (managed by Ansible)"
+    if systemctl --user is-active --quiet "$(unit "$role")"; then
+        busy_guard "$role" "$force"
+        systemctl --user stop "$(unit "$role")"
+    fi
+    echo "removed role $role; its folder stays: $(conf_get "$role" RC_DIR)"
+    rm -- "${CONF_DIR}/${role}.conf"
+}
+
+cmd_logs() {
+    local role; role="$(resolve "${1:?role missing}")"
+    journalctl --user -u "$(unit "$role")" -n "${2:-40}" --no-pager -o short-iso
+}
+
+[[ -d "$CONF_DIR" ]] || die "no role configs in $CONF_DIR"
+case "${1:-ls}" in
+    ls|list|status) cmd_ls ;;
+    up|start) shift; cmd_up "$@" ;;
+    down|stop) shift; cmd_down "$@" ;;
+    restart) shift; cmd_restart "$@" ;;
+    new|create) shift; cmd_new "$@" ;;
+    rm|remove) shift; cmd_rm "$@" ;;
+    logs) shift; cmd_logs "$@" ;;
+    *) usage ;;
+esac
