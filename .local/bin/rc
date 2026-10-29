@@ -62,7 +62,7 @@ main_pid() { systemctl --user show -p MainPID --value "$(unit "$1")"; }
 sessions() {  # one `claude --print --sdk-url` child per session
     local pid; pid="$(main_pid "$1")"
     [[ "$pid" != 0 ]] || { echo 0; return; }
-    pgrep -P "$pid" -f -- '--sdk-url' | wc -l
+    { pgrep -P "$pid" -f -- '--sdk-url' || true; } | wc -l  # pgrep exits 1 while no session runs yet
 }
 
 project_dir() { echo "${PROJECTS_DIR}/$(conf_get "$1" RC_DIR | sed 's/[^A-Za-z0-9]/-/g')"; }
