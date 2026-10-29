@@ -16,9 +16,14 @@
 #   rc trip <destination> [up options]      role trip-<slug> in ~/Obsidian/Adrixan/Travel/Trips/<slug>
 #                                           (created on first use, resumed later)
 #   rc trips                                trip roles, most recently active first
-#   rc projects                             folders in ~/code with git, trust and role state
-#   rc code <project> [up options]          role code-<project> for ~/code/<project>
+#   rc projects                             folders in ~/code, most recently used first
+#   rc code <project> [up options]          a Code session (role code, served from ~/code, so no extra
+#                                           trust) focused on ~/code/<project>
 #   rc code --new <name> [up options]       creates ~/code/<name> with a minimal AGENTS.md first
+#   rc code --own <project> [up options]    own role code-<project> in the project folder (client repos;
+#                                           needs the repository's own trust)
+#   rc menu                                 running roles, stopped roles, trips, recent projects, RAM
+#   rc hook code-session                    SessionStart hook of ~/code/.claude/settings.json
 # <role> is the role name or its label (case-insensitive).
 # ==============================================================================
 
@@ -34,6 +39,14 @@ MIN_AVAILABLE_MB=1024
 BUSY_MINUTES=15
 CUSTOM_MARKER="# Created by rc new"
 OPTIONAL_PLUGINS=(dev research travel)
+# One server per folder (a second `claude remote-control` in ~/code is refused), so every project
+# shares the code role's server; `rc code` queues a focus ticket that the next new session takes
+STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-rc"
+FOCUS_PENDING="${STATE_DIR}/code-focus-pending"
+FOCUS_SESSIONS="${STATE_DIR}/code-focus-sessions"
+FOCUS_LOG="${STATE_DIR}/code-focus.log"
+FOCUS_TTL_MIN=30
+PROJECT_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$'
 
 die() { echo "rc: $*" >&2; exit 1; }
 unit() { echo "claude-remote-control@$1.service"; }
@@ -311,51 +324,161 @@ cmd_trips() {
 
 code_role() { echo "code-$(slugify "$1")"; }
 
-cmd_projects() {
-    local d name act git trusted role state
+project_name() {  # exact or case-insensitive folder name in ~/code ("linguafusion" -> LinguaFusion)
+    local want="$1" match
+    [[ "$want" =~ $PROJECT_RE ]] || die "project name: letters, digits, dot, underscore, hyphen"
+    [[ -d "${CODE_DIR}/${want}" ]] && { echo "$want"; return; }
+    match="$(find "$CODE_DIR" -mindepth 1 -maxdepth 1 -type d -iname "$want" -printf '%f\n' | head -1)"
+    [[ -n "$match" ]] || die "no project '$want' in $CODE_DIR (rc projects lists them)"
+    echo "$match"
+}
+
+client_repo() {  # claude-client-init settings, which a session started in ~/code would not load
+    local s="$1/.claude/settings.json"
+    [[ -r "$s" ]] && jq -e '((.deniedMcpServers // []) | length > 0) or .disableClaudeAiConnectors == true' "$s" >/dev/null
+}
+
+project_rows() {  # TSV: last use (epoch), project, git, note; most recent first
+    local d name act git note role t p
+    local -A focused=()
+    if [[ -r "$FOCUS_LOG" ]]; then  # chronological, so the last line per project wins
+        while IFS=$'\t' read -r t p; do [[ "$t" =~ ^[0-9]+$ && -n "$p" ]] && focused[$p]="$t"; done < "$FOCUS_LOG"
+    fi
     for d in "${CODE_DIR}"/*/; do
         d="${d%/}"; name="$(basename "$d")"
         if [[ -e "$d/.git" ]]; then git=yes; else git=no; fi
-        # Last Claude session in the project (bulk commits across all repos make commit dates useless)
+        # Last Claude session (bulk commits across all repos make commit dates useless): a focused ~/code
+        # session or an own role's transcript, else the last commit
         act="$(find "${PROJECTS_DIR}/$(sed 's/[^A-Za-z0-9]/-/g' <<< "$d")" -maxdepth 1 -name '*.jsonl' -size +0 -printf '%T@\n' 2>/dev/null | sort -n | tail -1 || true)"
         act="${act%.*}"
+        [[ "${focused[$name]:-0}" -gt "${act:-0}" ]] && act="${focused[$name]}"
         [[ -n "$act" ]] || act="$(git -C "$d" log -1 --format=%ct 2>/dev/null || stat -c %Y "$d")"
-        is_trusted "$d" && trusted=yes || trusted=no
-        role="$(code_role "$name")"; state="-"
-        [[ -e "${CONF_DIR}/${role}.conf" ]] && state="$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)"
-        printf '%s\t%s\t%s\t%s\t%s\n' "$act" "$name" "$git" "$trusted" "$state"
-    done | sort -rn | awk -F'\t' -v now="$(date +%s)" \
-        'BEGIN{printf "%-36s %-4s %-7s %-9s %s\n","PROJECT","GIT","TRUSTED","ROLE","LAST_USED"} {printf "%-36s %-4s %-7s %-9s %dd\n",$2,$3,$4,$5,(now-$1)/86400}'
+        note="-"
+        client_repo "$d" && note="client repo: rc code --own"
+        role="$(code_role "$name")"
+        [[ -e "${CONF_DIR}/${role}.conf" ]] && note="own role ${role}: $(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)"
+        printf '%s\t%s\t%s\t%s\n' "$act" "$name" "$git" "$note"
+    done | sort -rn
+}
+
+cmd_projects() {
+    project_rows | awk -F'\t' -v now="$(date +%s)" \
+        'BEGIN{printf "%-36s %-4s %-9s %s\n","PROJECT","GIT","LAST_USED","NOTE"} {printf "%-36s %-4s %-9s %s\n",$2,$3,int((now-$1)/86400)"d",$4}'
     echo
-    echo "Start one with: rc code <project>   New project: rc code --new <name>"
+    echo "Start one with: rc code <project>   New project: rc code --new <name>   Client repo: rc code --own <project>"
 }
 
 cmd_code() {
-    local project="${1:?project missing}" dir role match=""
+    local project="${1:?project missing}" own=no dir role ticket
     shift
+    if [[ "$project" == --own ]]; then own=yes; project="${1:?project missing}"; shift; fi
     if [[ "$project" == --new ]]; then
         project="${1:?name missing}"; shift
-        [[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$ ]] || die "project name: letters, digits, dot, underscore, hyphen"
+        [[ "$project" =~ $PROJECT_RE ]] || die "project name: letters, digits, dot, underscore, hyphen"
         dir="${CODE_DIR}/${project}"
         [[ -e "$dir" ]] && die "$dir exists: use rc code $project"
         mkdir -p "$dir"
         printf '# %s\n\nNew project created %s. Describe goal, stack and conventions here; the global rules apply.\n' \
             "$project" "$(date +%F)" > "$dir/AGENTS.md"
         printf '@AGENTS.md\n' > "$dir/CLAUDE.md"
-        echo "created $dir (no git yet: after \`git init\` the repository needs its own trust, 'cd \"$dir\" && claude')"
+        echo "created $dir"
     else
-        dir="${CODE_DIR}/${project}"
-        if [[ ! -d "$dir" ]]; then  # case-insensitive fallback: "linguafusion" -> LinguaFusion
-            match="$(find "$CODE_DIR" -mindepth 1 -maxdepth 1 -type d -iname "$project" -printf '%f\n' | head -1)"
-            [[ -n "$match" ]] || die "no project '$project' in $CODE_DIR (rc projects lists them)"
-            project="$match"; dir="${CODE_DIR}/${project}"
+        project="$(project_name "$project")"
+    fi
+    dir="${CODE_DIR}/${project}"
+    if [[ "$own" == yes ]]; then
+        role="$(code_role "$project")"
+        if [[ ! -e "${CONF_DIR}/${role}.conf" ]]; then
+            cmd_new "$role" --label "Code: ${project}" --dir "$dir" --description "Code project ${project}" --no-files
         fi
+        cmd_up "$role" "$@"
+        return
     fi
-    role="$(code_role "$project")"
-    if [[ ! -e "${CONF_DIR}/${role}.conf" ]]; then
-        cmd_new "$role" --label "Code: ${project}" --dir "$dir" --description "Code project ${project}" --no-files
+    client_repo "$dir" && die "$project is a client repository: a session started in ~/code would bypass its MCP and connector denials; use rc code --own $project (needs the repository's own trust)"
+    mkdir -p "$FOCUS_PENDING"
+    ticket="${FOCUS_PENDING}/$(date +%s%N)"
+    printf '%s\n' "$project" > "$ticket"
+    if systemctl --user is-active --quiet "$(unit code)"; then
+        [[ $# -eq 0 ]] || echo "Code is already running, so '$*' does not apply"
+        echo "Code is running: in the Claude app open the Code environment and start a new session; it opens on $project (the focus waits ${FOCUS_TTL_MIN} min for that session)"
+        return
     fi
-    cmd_up "$role" "$@"
+    trap 'rm -f -- "$ticket"' EXIT  # a refused start must not leave the ticket for a later session
+    cmd_up code --fresh "$@"
+    trap - EXIT
+    echo "the session \"$(conf_get code RC_NAME)\" opens on $project"
+}
+
+focus_context() {  # additionalContext for a Code session focused on ~/code/<project>
+    local p="$1" d="${CODE_DIR}/$1" extra=""
+    compgen -G "$d/.claude/settings*.json" >/dev/null && extra+=" Its .claude/ settings (permissions, hooks, plugins) are not loaded in this session: follow them by hand where they matter."
+    [[ -e "$d/.mcp.json" ]] && extra+=" Its .mcp.json servers are not loaded; if a task needs them, ask Peter to start \`rc code --own $p\`."
+    printf '%s' "Code role session focused on the project $p (~/code/$p). It runs from ~/code so no extra workspace trust is needed; treat ~/code/$p as the project root: read its AGENTS.md (or CLAUDE.md) and .agents/ state files before acting, run commands and git there (cd ~/code/$p), and keep its handoff in ~/code/$p/.agents/session-handoff.md. Touch other ~/code projects only when Peter asks.$extra"
+}
+
+cmd_hook() {  # SessionStart hook in ~/code/.claude/settings.json; only the code role's sessions get a focus
+    [[ "${1:-}" == code-session ]] || usage
+    local input src sid ticket claim project="" context message=""
+    input="$(cat)"
+    [[ "${RC_DIR:-}" == "$CODE_DIR" ]] || return 0  # an interactive `claude` in ~/code stays untouched
+    src="$(jq -r '.source // empty' <<< "$input")"
+    sid="$(jq -r '.session_id // empty' <<< "$input")"
+    [[ "$sid" =~ ^[A-Za-z0-9_-]{1,100}$ ]] || sid=""
+    mkdir -p "$FOCUS_PENDING" "$FOCUS_SESSIONS"
+    if [[ -n "$sid" && -f "${FOCUS_SESSIONS}/${sid}" ]]; then
+        project="$(<"${FOCUS_SESSIONS}/${sid}")"
+    elif [[ "$src" == startup ]]; then
+        find "$FOCUS_PENDING" -maxdepth 1 -type f -name '[0-9]*' -mmin "+${FOCUS_TTL_MIN}" -delete
+        find "$FOCUS_SESSIONS" -maxdepth 1 -type f -mtime +30 -delete
+        claim="${FOCUS_PENDING}/.claim-$$"
+        for ticket in "$FOCUS_PENDING"/[0-9]*; do  # oldest first; mv is atomic, so two sessions never share one
+            [[ -f "$ticket" ]] && mv -- "$ticket" "$claim" 2>/dev/null || continue
+            project="$(<"$claim")"; rm -f -- "$claim"
+            break
+        done
+        [[ -n "$project" && -n "$sid" ]] && printf '%s\n' "$project" > "${FOCUS_SESSIONS}/${sid}"
+    fi
+    [[ "$project" =~ $PROJECT_RE && -d "${CODE_DIR}/${project}" ]] || project=""
+    if [[ -n "$project" ]]; then
+        printf '%s\t%s\n' "$(date +%s)" "$project" >> "$FOCUS_LOG"
+        context="$(focus_context "$project")"
+        [[ "$src" == startup ]] && message="[code-focus] ${project}: read the project's AGENTS.md and .agents/ state, then reply with a short status (branch, uncommitted changes, next steps from the handoff) and ask what to do."
+    else
+        context="Code role session in ~/code without a chosen project. Unless Peter's first message names one, ask with AskUserQuestion which folder in ~/code to work on: run \`rc projects\` and offer the three most recently used by folder name plus \"New project\" (create ~/code/<name> with AGENTS.md and a CLAUDE.md containing @AGENTS.md); his free text takes any name. Then treat that folder as the project root: read its AGENTS.md and .agents/ state first, run commands and git there, keep its handoff in its .agents/. Projects whose .claude/settings.json denies MCP servers (client repositories) are off limits here: they need \`rc code --own <project>\`."
+    fi
+    jq -n --arg c "$context" --arg m "$message" \
+        '{hookSpecificOutput: ({hookEventName: "SessionStart", additionalContext: $c} + (if $m == "" then {} else {initialUserMessage: $m} end))}'
+}
+
+cmd_menu() {  # one listing for the Greeter's menu
+    local f role idle
+    echo "RUNNING (label | role | sessions | last activity | MB):"
+    for f in "${CONF_DIR}"/*.conf; do
+        role="$(basename "$f" .conf)"
+        [[ "$role" == greeter ]] && continue
+        systemctl --user is-active --quiet "$(unit "$role")" || continue
+        idle="$(last_active_min "$role")"
+        printf '  %s | %s | %s | %s | %s\n' "$(conf_get "$role" RC_NAME)" "$role" "$(sessions "$role")" "${idle:+${idle} min ago}" "$(memory_mb "$role")"
+    done
+    echo "STOPPED ROLES, most recent first (label | role | last activity):"
+    for f in "${CONF_DIR}"/*.conf; do
+        role="$(basename "$f" .conf)"
+        [[ "$role" == greeter || "$role" == code || "$role" == code-* || "$role" == trip-* ]] && continue
+        systemctl --user is-active --quiet "$(unit "$role")" && continue
+        idle="$(last_active_min "$role")"
+        printf '%s\t  %s | %s | %s\n' "${idle:-999999999}" "$(conf_get "$role" RC_NAME)" "$role" "${idle:+${idle} min ago}"
+    done | sort -n | cut -f2-
+    echo "TRIPS, most recent first (label | role | state | last activity):"
+    for f in "${CONF_DIR}"/trip-*.conf; do
+        [[ -e "$f" ]] || continue
+        role="$(basename "$f" .conf)"
+        idle="$(last_active_min "$role")"
+        printf '%s\t  %s | %s | %s | %s\n' "${idle:-999999999}" "$(conf_get "$role" RC_NAME)" "$role" \
+            "$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)" "${idle:+${idle} min ago}"
+    done | sort -n | cut -f2-
+    echo "RECENT PROJECTS in ~/code (name | last used | note):"
+    project_rows | head -6 | awk -F'\t' -v now="$(date +%s)" '{printf "  %s | %d d ago | %s\n",$2,(now-$1)/86400,$4}'
+    echo "RAM available: $(available_mb) MB"
 }
 
 cmd_rm() {
@@ -376,6 +499,7 @@ cmd_logs() {
     journalctl --user -u "$(unit "$role")" -n "${2:-40}" --no-pager -o short-iso
 }
 
+[[ "${1:-}" == hook ]] && { shift; cmd_hook "$@"; exit 0; }  # also runs on machines without roles
 [[ -d "$CONF_DIR" ]] || die "no role configs in $CONF_DIR"
 case "${1:-ls}" in
     ls|list|status) cmd_ls ;;
@@ -389,5 +513,6 @@ case "${1:-ls}" in
     trips) cmd_trips ;;
     projects) cmd_projects ;;
     code) shift; cmd_code "$@" ;;
+    menu) cmd_menu ;;
     *) usage ;;
 esac
