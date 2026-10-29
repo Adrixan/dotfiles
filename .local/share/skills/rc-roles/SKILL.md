@@ -54,8 +54,11 @@ busy-session guards.
   sessions, last activity, memory), then the stopped roles in one line, then free RAM. The Greeter
   follows the menu in its own `AGENTS.md` instead.
 - Map Peter's words to role names, then check the name exists in the current `rc ls` (roles, trips and
-  code projects come and go): teacher, Lehrer → teaching; coding, dev → code; trip, Reise, travel
-  planner → travel; Prof. Aufner, content → educator; deep research → research; Dissertation → phd.
+  code projects come and go): teacher, Lehrer → teaching; coding, dev → `rc code <project>`; trip,
+  Reise, travel planner → `rc trip <destination>` (the general travel role is not offered); Prof.
+  Aufner, content → educator; deep research → research; Dissertation → phd.
+- Teaching and Deep Research start at boot (Ansible `autostart`) and reattach their previous session
+  when it stopped less than about 4 h earlier; the Greeter offers them only when they are stopped.
 - Before `rc down` or `rc restart` of a role with sessions: find its session with `ListAgents` (the name
   starts with the role folder's name), send it with `SendMessage` and `notify_when_idle: true`: "The
   Greeter is stopping this role: update `.agents/session-handoff.md` (trajectory, intent, open decisions,
