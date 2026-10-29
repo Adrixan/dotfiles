@@ -26,14 +26,25 @@ busy-session guards.
   use (folder `~/Obsidian/Adrixan/Travel/Trips/<slug>` with the trip brief, travel and research plugins)
   and starts or resumes it later; `rc trips` lists them. Each trip keeps `trip.md` and its handoff in its
   folder, so it can be restored after any pause.
-- Code projects: `rc projects` lists every folder in `~/code` (git, trust, role state, last session);
-  `rc code <project>` creates and starts the role `code-<project>` (nothing is written into the repo);
-  `rc code --new <name>` creates `~/code/<name>` with a minimal `AGENTS.md` first. A git repository needs its
-  own trust before it can run as a role; until then the general `code` role covers it.
+- Code projects: every Code session starts from `~/code` (trusted once), so no project needs its own
+  trust. `rc projects` lists the folders in `~/code`, most recently used first. `rc code <project>`
+  queues a focus ticket and starts the `code` role with a fresh session that opens on that project;
+  if Code already runs, the ticket waits 30 min for the next new session Peter starts in the Code
+  environment of the Claude app (one server per folder: a second `claude remote-control` in `~/code`
+  is refused). The SessionStart hook in `~/code/.claude/settings.json` (`rc hook code-session`) hands
+  the ticket to that session and keeps the focus on resume and compaction; a session without a ticket
+  asks Peter for the project. `rc code --new <name>` creates `~/code/<name>` with a minimal `AGENTS.md`
+  first. Client repositories (`.claude/settings.json` with MCP or connector denials from
+  `claude-client-init`) are refused, because a session from `~/code` would not load those denials: they
+  need `rc code --own <project>`, the role `code-<project>` in the repo folder, which needs the repo's own
+  trust. A repo's `.claude/` settings and `.mcp.json` are not loaded in `~/code` sessions either.
+- `rc menu`: running roles, stopped fixed and custom roles, trips, recent projects and free RAM in one
+  listing (the Greeter's menu).
 
 ## How to act
 - On a greeting or "what's running": run `rc ls` and answer with a short menu: running roles first (label,
-  sessions, last activity, memory), then the stopped roles in one line, then free RAM.
+  sessions, last activity, memory), then the stopped roles in one line, then free RAM. The Greeter
+  follows the menu in its own `AGENTS.md` instead.
 - Map Peter's words to role names, then check the name exists in the current `rc ls` (roles, trips and
   code projects come and go): teacher, Lehrer → teaching; coding, dev → code; trip, Reise, travel
   planner → travel; Prof. Aufner, content → educator; deep research → research; Dissertation → phd.
