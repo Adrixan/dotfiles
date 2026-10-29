@@ -23,7 +23,8 @@
 #   rc code --own <project> [up options]    own role code-<project> in the project folder (client repos;
 #                                           needs the repository's own trust)
 #   rc menu                                 running roles, stopped roles, trips, recent projects, RAM
-#   rc hook code-session                    SessionStart hook of ~/code/.claude/settings.json
+#   rc restore                              starts the roles that ran before a reboot (rc up marks them)
+#   rc hook code-session|greeter-start      SessionStart hooks of ~/code and of the Greeter
 # <role> is the role name or its label (case-insensitive).
 # ==============================================================================
 
@@ -45,8 +46,13 @@ STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-rc"
 FOCUS_PENDING="${STATE_DIR}/code-focus-pending"
 FOCUS_SESSIONS="${STATE_DIR}/code-focus-sessions"
 FOCUS_LOG="${STATE_DIR}/code-focus.log"
+FOCUS_REMOTE="${STATE_DIR}/code-focus-remote"  # cse_<id> of a session -> project
 FOCUS_TTL_MIN=30
 PROJECT_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$'
+# Roles started with rc up and not stopped with rc down; the Greeter's start hook brings them back
+WANTED_DIR="${STATE_DIR}/wanted"
+RC_BIN="$(realpath -- "$0")"
+RESUME_HOURS=4
 
 die() { echo "rc: $*" >&2; exit 1; }
 unit() { echo "claude-remote-control@$1.service"; }
@@ -157,21 +163,31 @@ fresh_pointer() {  # next start creates a new session instead of reattaching the
     fi
 }
 
-resume_info() {  # a restart reattaches the previous sessions for about 4 h after the stop (relay limit)
-    local role="$1" pointer stopped since hours
+stopped_hours() {  # hours since the role's server stopped, empty without a previous session
+    local role="$1" pointer stopped since
     pointer="$(project_dir "$role")/bridge-pointer.json"
-    [[ -f "$pointer" ]] || { echo "no previous session: a new one starts"; return; }
+    [[ -f "$pointer" ]] || return 0
     # A stopped template instance is unloaded, so its timestamps are empty: take the journal's last stop
     stopped="$(journalctl --user -u "$(unit "$role")" -o short-unix --no-pager --grep '^Stopped ' 2>/dev/null | tail -1 | cut -d' ' -f1)"
     since="${stopped%.*}"
     [[ "$since" =~ ^[0-9]+$ ]] || since="$(stat -c %Y "$pointer")"
-    hours=$(( ( $(date +%s) - since ) / 3600 ))
-    if [[ "$hours" -lt 4 ]]; then
-        echo "resuming the previous session ($(jq -r '.sessionId // "unknown"' "$pointer"), stopped ${hours} h ago)"
+    echo $(( ( $(date +%s) - since ) / 3600 ))
+}
+
+resume_info() {  # a restart reattaches the previous session for about 4 h after the stop (relay limit)
+    local role="$1" hours
+    hours="$(stopped_hours "$role")"
+    if [[ -z "$hours" ]]; then
+        echo "no previous session: a new one starts"
+    elif [[ "$hours" -lt "$RESUME_HOURS" ]]; then
+        echo "resuming the previous session ($(jq -r '.sessionId // "unknown"' "$(project_dir "$role")/bridge-pointer.json"), stopped ${hours} h ago)"
     else
-        echo "previous session stopped ${hours} h ago, past the ~4 h reattach window: a new session starts and reads .agents/session-handoff.md"
+        echo "previous session stopped ${hours} h ago, past the ~${RESUME_HOURS} h reattach window: a new session starts and reads .agents/session-handoff.md"
     fi
 }
+
+want() { mkdir -p "$WANTED_DIR"; touch -- "${WANTED_DIR}/$1"; }
+unwant() { rm -f -- "${WANTED_DIR}/$1"; }
 
 cmd_up() {
     local role ttl="" fresh=no force=no dir
@@ -185,6 +201,7 @@ cmd_up() {
         esac
     done
     if systemctl --user is-active --quiet "$(unit "$role")"; then
+        want "$role"
         echo "$role is already running ($(sessions "$role") sessions)"
         return
     fi
@@ -196,10 +213,12 @@ cmd_up() {
     fi
     if [[ "$fresh" == yes ]]; then fresh_pointer "$role"; else resume_info "$role"; fi
     systemctl --user start "$(unit "$role")"
+    want "$role"
     if [[ -n "$ttl" ]]; then
         systemctl --user stop "rc-ttl-${role}.timer" 2>/dev/null || true
+        # rc down, so the expired role is not brought back after a reboot
         systemd-run --user --quiet --unit "rc-ttl-${role}" --on-active="$ttl" --timer-property=AccuracySec=1min \
-            /usr/bin/systemctl --user stop "$(unit "$role")"
+            "$RC_BIN" down "$role" --force
         echo "auto-stop in $ttl"
     fi
     echo "started $role: open the session \"$(conf_get "$role" RC_NAME)\" in the Claude app (appears within about 30 s)"
@@ -209,9 +228,10 @@ cmd_down() {
     local role force=no
     role="$(resolve "${1:?role missing}")"; shift
     [[ "${1:-}" == --force ]] && force=yes
-    systemctl --user is-active --quiet "$(unit "$role")" || { echo "$role is not running"; return; }
+    systemctl --user is-active --quiet "$(unit "$role")" || { unwant "$role"; echo "$role is not running"; return; }
     busy_guard "$role" "$force"
     systemctl --user stop "$(unit "$role")"
+    unwant "$role"
     systemctl --user stop "rc-ttl-${role}.timer" 2>/dev/null || true
     echo "stopped $role (starting it again works after about 1 to 2 min)"
 }
@@ -368,8 +388,42 @@ cmd_projects() {
     echo "Start one with: rc code <project>   New project: rc code --new <name>   Client repo: rc code --own <project>"
 }
 
+queue_focus() {  # focus ticket for the next new Code session; prints its path
+    local ticket
+    mkdir -p "$FOCUS_PENDING"
+    ticket="${FOCUS_PENDING}/$(date +%s%N)"
+    printf '%s\n' "$1" > "$ticket"
+    echo "$ticket"
+}
+
+focus_of_remote() {  # project a session (cse_<id>) is focused on, or empty
+    [[ "$1" =~ ^cse_[A-Za-z0-9]+$ && -f "${FOCUS_REMOTE}/$1" ]] && cat -- "${FOCUS_REMOTE}/$1"
+    return 0
+}
+
+live_session_for() {  # cse_<id> of a running Code session focused on the project, or empty
+    local pid rid
+    pid="$(main_pid code)"
+    [[ "$pid" != 0 ]] || return 0
+    for rid in $({ pgrep -a -P "$pid" -f -- '--sdk-url' || true; } | grep -o -- '--session-id cse_[A-Za-z0-9]*' | cut -d' ' -f2); do
+        [[ "$(focus_of_remote "$rid")" == "$1" ]] && { echo "$rid"; return 0; }
+    done
+    return 0
+}
+
+remote_session_id() {  # cse_<id> of the `claude --sdk-url` process this hook runs under
+    local pid="$PPID" i id
+    for i in 1 2 3 4 5 6; do
+        [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -r "/proc/$pid/cmdline" ]] || return 0
+        id="$(tr '\0' '\n' < "/proc/$pid/cmdline" | sed -n '/^--session-id$/{n;p;q}')"
+        [[ "$id" =~ ^cse_[A-Za-z0-9]+$ ]] && { echo "$id"; return 0; }
+        pid="$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null || true)"
+    done
+    return 0
+}
+
 cmd_code() {
-    local project="${1:?project missing}" own=no dir role ticket
+    local project="${1:?project missing}" own=no dir role ticket rid hours
     shift
     if [[ "$project" == --own ]]; then own=yes; project="${1:?project missing}"; shift; fi
     if [[ "$project" == --new ]]; then
@@ -395,14 +449,26 @@ cmd_code() {
         return
     fi
     client_repo "$dir" && die "$project is a client repository: a session started in ~/code would bypass its MCP and connector denials; use rc code --own $project (needs the repository's own trust)"
-    mkdir -p "$FOCUS_PENDING"
-    ticket="${FOCUS_PENDING}/$(date +%s%N)"
-    printf '%s\n' "$project" > "$ticket"
     if systemctl --user is-active --quiet "$(unit code)"; then
         [[ $# -eq 0 ]] || echo "Code is already running, so '$*' does not apply"
+        rid="$(live_session_for "$project")"
+        if [[ -n "$rid" ]]; then
+            echo "$project already has a running Code session: open https://claude.ai/code/session_${rid#cse_}"
+            return
+        fi
+        queue_focus "$project" >/dev/null
         echo "Code is running: in the Claude app open the Code environment and start a new session; it opens on $project (the focus waits ${FOCUS_TTL_MIN} min for that session)"
         return
     fi
+    rid="$(jq -r '.sessionId // empty' "$(project_dir code)/bridge-pointer.json" 2>/dev/null || true)"
+    rid="cse_${rid#session_}"
+    hours="$(stopped_hours code)"
+    if [[ -n "$hours" && "$hours" -lt "$RESUME_HOURS" && "$(focus_of_remote "$rid")" == "$project" ]]; then
+        cmd_up code "$@"
+        echo "the previous session on $project comes back"
+        return
+    fi
+    ticket="$(queue_focus "$project")"
     trap 'rm -f -- "$ticket"' EXIT  # a refused start must not leave the ticket for a later session
     cmd_up code --fresh "$@"
     trap - EXIT
@@ -416,16 +482,48 @@ focus_context() {  # additionalContext for a Code session focused on ~/code/<pro
     printf '%s' "Code role session focused on the project $p (~/code/$p). It runs from ~/code so no extra workspace trust is needed; treat ~/code/$p as the project root: read its AGENTS.md (or CLAUDE.md) and .agents/ state files before acting, run commands and git there (cd ~/code/$p), and keep its handoff in ~/code/$p/.agents/session-handoff.md. Touch other ~/code projects only when Peter asks.$extra"
 }
 
-cmd_hook() {  # SessionStart hook in ~/code/.claude/settings.json; only the code role's sessions get a focus
+cmd_restore() {  # start the roles that ran before a reboot; prints one summary line, or nothing
+    local f role out ok=() failed=()
+    [[ -d "$WANTED_DIR" ]] || return 0
+    for f in "$WANTED_DIR"/*; do
+        [[ -e "$f" ]] || continue
+        role="$(basename "$f")"
+        [[ "$role" != greeter && -f "${CONF_DIR}/${role}.conf" ]] || { rm -f -- "$f"; continue; }
+        systemctl --user is-active --quiet "$(unit "$role")" && continue
+        if out="$( (cmd_up "$role") 2>&1 )"; then
+            ok+=("$(conf_get "$role" RC_NAME)")
+        else
+            failed+=("$(conf_get "$role" RC_NAME) (${out##*rc: })")
+        fi
+    done
+    [[ ${#ok[@]} -gt 0 ]] && (IFS=,; echo "restarted after a reboot or crash: ${ok[*]}")
+    [[ ${#failed[@]} -gt 0 ]] && (IFS=';'; echo "could not restart: ${failed[*]}")
+    return 0
+}
+
+cmd_hook() {  # SessionStart hooks: code-session for ~/code, greeter-start for the Greeter
+    if [[ "${1:-}" == greeter-start ]]; then
+        local restored
+        cat >/dev/null
+        restored="$(cmd_restore | tr '\n' ' ')"
+        jq -n --arg m "[greeter-start] Show the role menu.${restored:+ Put this in the status line: ${restored% }}" \
+            '{hookSpecificOutput: {hookEventName: "SessionStart", initialUserMessage: $m}}'
+        return 0
+    fi
     [[ "${1:-}" == code-session ]] || usage
-    local input src sid ticket claim project="" context message=""
+    local input src sid rid ticket claim project="" context message="" fresh=no
     input="$(cat)"
     [[ "${RC_DIR:-}" == "$CODE_DIR" ]] || return 0  # an interactive `claude` in ~/code stays untouched
     src="$(jq -r '.source // empty' <<< "$input")"
     sid="$(jq -r '.session_id // empty' <<< "$input")"
     [[ "$sid" =~ ^[A-Za-z0-9_-]{1,100}$ ]] || sid=""
-    mkdir -p "$FOCUS_PENDING" "$FOCUS_SESSIONS"
-    if [[ -n "$sid" && -f "${FOCUS_SESSIONS}/${sid}" ]]; then
+    rid="$(remote_session_id)"  # stable across reattaching after a Code restart
+    mkdir -p "$FOCUS_PENDING" "$FOCUS_SESSIONS" "$FOCUS_REMOTE"
+    find "$FOCUS_REMOTE" -maxdepth 1 -type f -mtime +30 -delete
+    project="$(focus_of_remote "$rid")"
+    if [[ -n "$project" ]]; then
+        :
+    elif [[ -n "$sid" && -f "${FOCUS_SESSIONS}/${sid}" ]]; then
         project="$(<"${FOCUS_SESSIONS}/${sid}")"
     elif [[ "$src" == startup ]]; then
         find "$FOCUS_PENDING" -maxdepth 1 -type f -name '[0-9]*' -mmin "+${FOCUS_TTL_MIN}" -delete
@@ -433,16 +531,17 @@ cmd_hook() {  # SessionStart hook in ~/code/.claude/settings.json; only the code
         claim="${FOCUS_PENDING}/.claim-$$"
         for ticket in "$FOCUS_PENDING"/[0-9]*; do  # oldest first; mv is atomic, so two sessions never share one
             [[ -f "$ticket" ]] && mv -- "$ticket" "$claim" 2>/dev/null || continue
-            project="$(<"$claim")"; rm -f -- "$claim"
+            project="$(<"$claim")"; rm -f -- "$claim"; fresh=yes
             break
         done
-        [[ -n "$project" && -n "$sid" ]] && printf '%s\n' "$project" > "${FOCUS_SESSIONS}/${sid}"
     fi
     [[ "$project" =~ $PROJECT_RE && -d "${CODE_DIR}/${project}" ]] || project=""
     if [[ -n "$project" ]]; then
+        [[ -n "$sid" ]] && printf '%s\n' "$project" > "${FOCUS_SESSIONS}/${sid}"
+        [[ -n "$rid" ]] && printf '%s\n' "$project" > "${FOCUS_REMOTE}/${rid}"
         printf '%s\t%s\n' "$(date +%s)" "$project" >> "$FOCUS_LOG"
         context="$(focus_context "$project")"
-        [[ "$src" == startup ]] && message="[code-focus] ${project}: read the project's AGENTS.md and .agents/ state, then reply with a short status (branch, uncommitted changes, next steps from the handoff) and ask what to do."
+        [[ "$fresh" == yes ]] && message="[code-focus] ${project}: read the project's AGENTS.md and .agents/ state, then reply with a short status (branch, uncommitted changes, next steps from the handoff) and ask what to do."
     else
         context="Code role session in ~/code without a chosen project. Unless Peter's first message names one, ask with AskUserQuestion which folder in ~/code to work on: run \`rc projects\` and offer the three most recently used by folder name plus \"New project\" (create ~/code/<name> with AGENTS.md and a CLAUDE.md containing @AGENTS.md); his free text takes any name. Then treat that folder as the project root: read its AGENTS.md and .agents/ state first, run commands and git there, keep its handoff in its .agents/. Projects whose .claude/settings.json denies MCP servers (client repositories) are off limits here: they need \`rc code --own <project>\`."
     fi
@@ -491,6 +590,7 @@ cmd_rm() {
         systemctl --user stop "$(unit "$role")"
     fi
     echo "removed role $role; its folder stays: $(conf_get "$role" RC_DIR)"
+    unwant "$role"
     rm -- "${CONF_DIR}/${role}.conf"
 }
 
@@ -514,5 +614,6 @@ case "${1:-ls}" in
     projects) cmd_projects ;;
     code) shift; cmd_code "$@" ;;
     menu) cmd_menu ;;
+    restore) cmd_restore ;;
     *) usage ;;
 esac

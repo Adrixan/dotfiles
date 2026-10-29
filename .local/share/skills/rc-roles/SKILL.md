@@ -38,8 +38,16 @@ busy-session guards.
   `claude-client-init`) are refused, because a session from `~/code` would not load those denials: they
   need `rc code --own <project>`, the role `code-<project>` in the repo folder, which needs the repo's own
   trust. A repo's `.claude/` settings and `.mcp.json` are not loaded in `~/code` sessions either.
+  Resume: when Code runs and the project already has a session, `rc code` prints that session's link
+  instead of queueing a new one; when Code is stopped and its last session (the one a restart reattaches)
+  was on that project, `rc code` resumes it (within about 4 h), otherwise a fresh session opens on it.
 - `rc menu`: running roles, stopped fixed and custom roles, trips, recent projects and free RAM in one
   listing (the Greeter's menu).
+- Roles return after a reboot: `rc up` marks a role as wanted, `rc down`, `rc rm` and an expired `--ttl`
+  unmark it (state in `~/.local/state/claude-rc/wanted/`). The Greeter's SessionStart hook
+  (`rc hook greeter-start`) runs `rc restore` first, which starts every wanted role that is not running,
+  and adds what it restarted or could not restart to the start message. A `--ttl` does not survive a
+  reboot.
 
 ## How to act
 - On a greeting or "what's running": run `rc ls` and answer with a short menu: running roles first (label,
