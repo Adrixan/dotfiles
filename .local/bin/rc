@@ -562,7 +562,8 @@ cmd_menu() {  # one listing for the Greeter's menu
     echo "STOPPED ROLES, most recent first (label | role | last activity):"
     for f in "${CONF_DIR}"/*.conf; do
         role="$(basename "$f" .conf)"
-        [[ "$role" == greeter || "$role" == code || "$role" == code-* || "$role" == trip-* ]] && continue
+        # Code starts per project and Travel Planner per trip (Peter, 2026-10-29), so neither is offered here
+        [[ "$role" == greeter || "$role" == code || "$role" == travel || "$role" == code-* || "$role" == trip-* ]] && continue
         systemctl --user is-active --quiet "$(unit "$role")" && continue
         idle="$(last_active_min "$role")"
         printf '%s\t  %s | %s | %s\n' "${idle:-999999999}" "$(conf_get "$role" RC_NAME)" "$role" "${idle:+${idle} min ago}"
