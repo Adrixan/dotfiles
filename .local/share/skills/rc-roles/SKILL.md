@@ -1,6 +1,6 @@
 ---
 name: rc-roles
-description: Start, stop, list and create Claude Code remote-control roles on schulpc (code, teaching, educator, research, phd, travel, greeter, one role per trip, one role per code project, and custom roles) with the `rc` command. Use when Peter greets the Greeter session, asks which roles are running, wants a role started or stopped ("start teacher for 3 hours", "stop everything idle", "fresh code session"), wants to plan a trip or resume one ("plan Berlin", "back to Prague"), wants to work on or create a code project, or wants a new custom role.
+description: Start, stop, list and create Claude Code remote-control roles on schulpc (code, teaching, educator, research, phd, travel, greeter, one role per trip, one role per code project, and custom roles) with the `rc` command. Use when Peter greets the Greeter session, asks which roles are running, wants a role started or stopped ("start teacher for 3 hours", "stop everything idle", "fresh code session"), wants to plan a trip or resume one ("plan Berlin", "back to Prague"), wants to work on or create a code project, wants a deep research on a topic ("research <topic>") or to resume one, or wants a new custom role.
 ---
 
 # rc-roles
@@ -16,12 +16,19 @@ busy-session guards.
   allows that for about 4 hours after the stop; later a new session starts and reads
   `.agents/session-handoff.md`); `--ttl` stops the role automatically; `--fresh` starts a new session on
   purpose; `--force` skips the RAM guard (1 GB available). Pass on the resume line `rc up` prints.
-- `rc down <role> [--force]` and `rc restart <role> [--force]`: refuse while a session was active in the
-  last 15 minutes; `--force` ends those sessions.
+- `rc down <role> [--wait 10] [--now|--cancel]`: with sessions running it returns at once and a
+  background unit `rc-stop-<role>` stops the role as soon as its `.agents/session-handoff.md` (for code
+  project roles the project's, for the general Code role the projects its live sessions are on) is newer
+  than the request, the turn that wrote it has ended (the global Stop hook records turn ends) and the
+  session has been quiet for 60 s; at the latest after `--wait` minutes (default 10) it stops anyway.
+  Without sessions, or with `--now`, it stops at once; `--cancel` drops a pending stop, and so do `rc up`
+  and `rc restart` of that role. The role is no longer restored after a reboot once the stop is
+  requested. `rc menu` and `rc ls` show pending stops. No idle notice is needed. `rc restart <role>`
+  restarts at once (the sessions reattach).
 - `rc new <name> --label "…" --plugins dev,research,travel --brief "…" [--description "…"] [--args "--spawn worktree"]`:
   creates `~/Obsidian/Adrixan/AI/Roles/<name>` with `AGENTS.md` (the brief) and plugin settings. The core
   plugin (GitHub, memory, fetch, Nextcloud, mail, docs) is always on.
-- `rc rm <name> [--force]` removes a custom role (the folder stays); `rc logs <role> [lines]`.
+- `rc rm <name>` stops and removes a custom role (the folder stays); `rc logs <role> [lines]`.
 - Trips, several in parallel: `rc trip <destination> [up options]` creates the role `trip-<slug>` on first
   use (folder `~/Obsidian/Adrixan/Travel/Trips/<slug>` with the trip brief, travel and research plugins)
   and starts or resumes it later; `rc trips` lists them. Each trip keeps `trip.md` and its handoff in its
@@ -39,7 +46,18 @@ busy-session guards.
   denials: they need `rc code --own <project>`, a role in the repo folder itself, which needs the repo's
   own trust. A repo's `.claude/` settings and `.mcp.json` are not loaded in helper-folder sessions either.
   The general `code` role (`~/code`) stays for cross-project work; its sessions ask for a project.
-- `rc menu`: running roles, stopped fixed and custom roles, trips, recent projects and free RAM in one
+- Deep research per topic, any number in parallel: `rc research "<topic>" [up options]` creates the role
+  `research-<slug>` (session "Research: <topic>"), served from the hidden helper folder
+  `~/Obsidian/Adrixan/Research/.rc/<slug>` (inherits the Research trust and its `AGENTS.md`), creates the
+  job folder `Research/Reports/<date>-<slug>/` with a `report.md` stub (`status: running`) and starts at
+  once: its start hook sends the topic to the new session with the `deep-research` skill. Topic roles stop
+  themselves after 8 h (`--ttl 8h` unless another `--ttl` is given). `rc research <slug>` (or the role
+  name) resumes an existing topic: the session reattaches within about 4 h, later a new session reads
+  report, sources and handoff and replies with a status. `rc researches` lists the topics with report
+  status; `rc research --index` rewrites `Research/index.md`. Results always land in the vault (rules in
+  `Research/AGENTS.md`).
+- `rc menu`: running roles (with pending stops), stopped fixed and custom roles, trips, research topics,
+  recent projects and free RAM in one
   listing (the Greeter's menu).
 - Roles return after a reboot: `rc up` marks a role as wanted, `rc down`, `rc rm` and an expired `--ttl`
   unmark it (state in `~/.local/state/claude-rc/wanted/`). The Greeter's SessionStart hook
@@ -54,15 +72,17 @@ busy-session guards.
 - Map Peter's words to role names, then check the name exists in the current `rc ls` (roles, trips and
   code projects come and go): teacher, Lehrer → teaching; coding, dev → `rc code <project>`; trip,
   Reise, travel planner → `rc trip <destination>` (the general travel role is not offered); Prof.
-  Aufner, content → educator; deep research → research; Dissertation → phd.
+  Aufner, content → educator; "research <topic>", deep research on a topic → `rc research "<topic>"`
+  (general research chat without a topic → research); Dissertation → phd.
 - Teaching and Deep Research start at boot (Ansible `autostart`) and reattach their previous session
   when it stopped less than about 4 h earlier; the Greeter offers them only when they are stopped.
-- Before `rc down` or `rc restart` of a role with sessions: find its session with `ListAgents` (the name
-  starts with the role folder's name), send it with `SendMessage` and `notify_when_idle: true`: "The
-  Greeter is stopping this role: update `.agents/session-handoff.md` (trajectory, intent, open decisions,
-  next steps), then stop." Stop the role after the idle notice. If no session is listed, or the notice
-  says it expired, stop anyway and say the handoff may be missing.
-- Never add `--force` on your own. When `rc` refuses (recent activity, low RAM), report why and ask.
+- Stopping a role with sessions: run `rc down <role>` first (it records the request time and starts the
+  bounded wait), then find its sessions with `ListAgents` (the names start with the role folder's name)
+  and send every one of them with `SendMessage`: "The Greeter is stopping this role: update `.agents/session-handoff.md`
+  (trajectory, intent, open decisions, next steps) now; the role stops automatically once the handoff is
+  written." No `notify_when_idle`. If no session is listed, use `rc down <role> --now` and say the
+  handoff may be missing. Peter saying "stop now" or "force" means `--now`.
+- The RAM guard of `rc up` stays: never add `--force` to `rc up` on your own; report the refusal and ask.
 - Before `rc new`, settle in one question: name, label, plugins (suggest based on the purpose: code →
   dev; literature, law → research; trips → travel) and a two to four sentence brief that becomes the
   role's `AGENTS.md`. Custom-role briefs must not contain secrets or personal data of students or family.
