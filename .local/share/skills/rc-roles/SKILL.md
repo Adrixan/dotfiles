@@ -21,8 +21,9 @@ busy-session guards.
   `rc handoff-done` and ended that turn. Fallback for a role with one session that does not signal: its
   `.agents/session-handoff.md` (for code project roles the project's, for the general Code role the
   projects its live sessions are on) is newer than the request, that turn has ended (the global Stop hook
-  records turn ends) and the session has been quiet for 60 s. At the latest after `--wait` minutes
-  (default 10) it stops anyway.
+  records turn ends) and the session has been quiet for 60 s. After `--wait` minutes (default 10) it stops
+  anyway unless a session is still in a turn; a session in a turn gets until twice that (20 min), then the
+  stop is forced.
   Without sessions, or with `--now`, it stops at once; `--cancel` drops a pending stop, and so do `rc up`
   and `rc restart` of that role. The role is no longer restored after a reboot once the stop is
   requested. `rc menu` and `rc ls` show pending stops. No idle notice is needed. `rc restart <role>`
