@@ -7,9 +7,9 @@
 # Usage:
 #   rc ls                                   roles with state, sessions, last activity, memory
 #   rc up <role> [--ttl 4h] [--fresh] [--force]  resumes the last session (relay keeps it ~4 h after a stop)
-#   rc down <role> [--wait 10] [--now|--cancel]  stops once .agents/session-handoff.md is newer than the
-#                                           request and the session was quiet for 60 s, at the latest
-#                                           after --wait minutes (forced); --now stops at once
+#   rc down <role> [--wait 10] [--now|--cancel]  stops seconds after each session ran rc handoff-done and
+#                                           ended that turn; after --wait minutes anyway unless a session
+#                                           is in a turn, after twice that in any case; --now stops at once
 #   rc handoff-done [--stop] [--file F]     run by a role's session after writing its handoff: the role stops
 #                                           seconds after the turn ends (--stop: request that stop itself)
 #   rc restart <role>
@@ -50,7 +50,9 @@ CODE_DIR="${HOME}/code"
 PROJECTS_DIR="${HOME}/.claude/projects"
 CLAUDE_STATE="${HOME}/.claude.json"
 MIN_AVAILABLE_MB=1024
-STOP_WAIT_MIN=10    # rc down: longest wait for the handoff before the stop is forced
+STOP_WAIT_MIN=10    # rc down: wait for the handoff, then stop unless a session is still in a turn
+STOP_HARD_FACTOR=2  # rc down: that wait times this is the hard limit, also for a session in a turn
+STOP_TURN_MARGIN=30 # in_turn: the transcript may change this long after a turn end (seconds)
 STOP_QUIET_SEC=60   # rc down: the session must have been quiet this long after its handoff
 NOTIFY_MIN_SEC=60   # turn-done hook: only turns at least this long end with a push
 CUSTOM_MARKER="# Created by rc new"
@@ -66,7 +68,7 @@ FOCUS_REMOTE="${STATE_DIR}/code-focus-remote"  # cse_<id> of a session -> projec
 PROJECT_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$'
 # Roles started with rc up and not stopped with rc down; the Greeter's start hook brings them back
 WANTED_DIR="${STATE_DIR}/wanted"
-STOPPING_DIR="${STATE_DIR}/stopping"  # <role>: request and deadline epochs of a pending rc down
+STOPPING_DIR="${STATE_DIR}/stopping"  # <role>: request, deadline and hard limit epochs of a pending rc down
 TURN_END_DIR="${STATE_DIR}/turn-end"  # <RC_DIR as key> and <cse_id>: epoch of the last turn end (Stop hook)
 DONE_DIR="${STATE_DIR}/handoff-done"  # <role>/<cse_id>: epoch a session reported its handoff (rc handoff-done)
 # Deep research per topic, in parallel: helper folders (hidden from Obsidian) below the trusted Research
@@ -223,9 +225,17 @@ role_of_dir() {  # role served from a folder, or empty
     return 0
 }
 
-stop_pending() {  # deadline epoch of a pending rc down, or empty
-    [[ -f "${STOPPING_DIR}/$1" ]] && systemctl --user is-active --quiet "rc-stop-$1.service" && cut -d' ' -f2 "${STOPPING_DIR}/$1"
+stop_pending() {  # hard limit epoch of a pending rc down, or empty
+    [[ -f "${STOPPING_DIR}/$1" ]] && systemctl --user is-active --quiet "rc-stop-$1.service" && cut -d' ' -f3 "${STOPPING_DIR}/$1"
     return 0
+}
+
+in_turn() {  # a session of the role is working: its transcript moved on after the last turn end
+    local quiet end now
+    quiet="$(last_active_sec "$1")"
+    [[ -n "$quiet" ]] || return 1
+    end="$(turn_end_epoch "$1")"; now="$(date +%s)"
+    if [[ "$end" -eq 0 ]]; then [[ "$quiet" -lt "$STOP_QUIET_SEC" ]]; else [[ $(( now - quiet - end )) -gt "$STOP_TURN_MARGIN" ]]; fi
 }
 
 cancel_stop() {  # drop a pending rc down; prints a note when there was one
@@ -332,7 +342,7 @@ cmd_up() {
 }
 
 cmd_down() {  # stop after the handoff (bounded wait) or at once; idle notices are not needed
-    local role mode=wait wait="$STOP_WAIT_MIN" now deadline
+    local role mode=wait wait="$STOP_WAIT_MIN" now deadline hard
     role="$(resolve "${1:?role missing}")"; shift
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -360,19 +370,19 @@ cmd_down() {  # stop after the handoff (bounded wait) or at once; idle notices a
         return
     fi
     # The request time is taken before the Greeter asks for the handoff, so a quick handoff still counts
-    now="$(date +%s)"; deadline=$(( now + wait * 60 ))
+    now="$(date +%s)"; deadline=$(( now + wait * 60 )); hard=$(( now + wait * 60 * STOP_HARD_FACTOR ))
     mkdir -p "$STOPPING_DIR"
-    echo "$now $deadline" > "${STOPPING_DIR}/${role}"
+    echo "$now $deadline $hard" > "${STOPPING_DIR}/${role}"
     unwant "$role"  # a reboot during the wait must not bring the role back
     systemctl --user reset-failed "rc-stop-${role}.service" 2>/dev/null || true
     systemd-run --user --quiet --collect --unit "rc-stop-${role}" "$RC_BIN" stop-wait "$role"
-    echo "stopping $role: right after each of its sessions ran 'rc handoff-done' and ended that turn (without the signal: once the handoff is newer than now and the session was quiet ${STOP_QUIET_SEC} s), at the latest at $(date -d "@$deadline" +%H:%M) (forced); ask its sessions for the handoff now"
+    echo "stopping $role: right after each of its sessions ran 'rc handoff-done' and ended that turn (without the signal: once the handoff is newer than now and the session was quiet ${STOP_QUIET_SEC} s), at $(date -d "@$deadline" +%H:%M) anyway unless a session is still in a turn, at $(date -d "@$hard" +%H:%M) in any case; ask its sessions for the handoff now"
 }
 
 cmd_stop_wait() {  # runs in the transient unit rc-stop-<role> that rc down starts
-    local role="$1" req deadline quiet handoff
+    local role="$1" req deadline hard quiet handoff extended=no
     [[ -f "${STOPPING_DIR}/${role}" ]] || exit 0
-    read -r req deadline < "${STOPPING_DIR}/${role}"
+    read -r req deadline hard < "${STOPPING_DIR}/${role}"
     # Any failure below still stops the role; rc down --cancel (SIGTERM) leaves it running. The trap runs
     # after this function has returned, so it reads a global
     STOP_ROLE="$role"
@@ -388,8 +398,15 @@ cmd_stop_wait() {  # runs in the transient unit rc-stop-<role> that rc down star
         if [[ "$(sessions "$role")" -le 1 && "$handoff" -ge "$req" && "$(turn_end_epoch "$role")" -ge "$handoff" && "${quiet:-$STOP_QUIET_SEC}" -ge "$STOP_QUIET_SEC" ]]; then
             echo "handoff written: stopping $role"; break
         fi
+        if [[ "$(date +%s)" -ge "$hard" ]]; then
+            echo "no handoff by the hard limit: stopping $role although a session may be in a turn"; break
+        fi
         if [[ "$(date +%s)" -ge "$deadline" ]]; then
-            echo "no handoff by the deadline: stopping $role anyway"; break
+            if ! in_turn "$role"; then
+                echo "no handoff by the deadline: stopping $role anyway"; break
+            fi
+            [[ "$extended" == yes ]] || echo "deadline passed while a session is in a turn: waiting until the hard limit"
+            extended=yes
         fi
         sleep 2
     done
