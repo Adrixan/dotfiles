@@ -177,6 +177,7 @@
 {% if env.TERMUX_VERSION == "" %}
       "ptsd": {"type": "remote", "url": "http://127.0.0.1:8790/servers/ptsd/mcp", "oauth": false},
       "file-accountant": {"type": "remote", "url": "http://127.0.0.1:8790/servers/file-accountant/mcp", "oauth": false},
+      "garmin": {"type": "remote", "url": "http://127.0.0.1:8790/servers/garmin/mcp", "oauth": false, "disabled": true},
       "package-versions": {"type": "remote", "url": "http://127.0.0.1:8790/servers/package-versions/mcp", "oauth": false},
       "osv": {
         "type": "local",

@@ -9,7 +9,8 @@
     { "serverName": "plugin:workstation-research:arxiv" },
     { "serverName": "plugin:workstation-dev:serena" },
     { "serverName": "file-accountant" },
-    { "serverName": "ptsd" }
+    { "serverName": "ptsd" },
+    { "serverName": "garmin" }
   ],
   "disableClaudeAiConnectors": true
 }
