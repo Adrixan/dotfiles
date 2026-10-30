@@ -15,7 +15,8 @@
       "mcp__plugin_workstation-mcp_nextcloud__*delete*",
       "mcp__plugin_workstation-mcp_nextcloud__*trash*",
       "mcp__plugin_workstation-mcp_github__merge_pull_request",
-      "mcp__plugin_workstation-mcp_github__*delete*"
+      "mcp__plugin_workstation-mcp_github__*delete*",
+      "mcp__garmin__upload_course"
     ],
     "defaultMode": "auto"
   },
