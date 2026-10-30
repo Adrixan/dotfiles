@@ -594,7 +594,7 @@ cmd_research() {
     for a in "$@"; do [[ "$a" == --ttl ]] && ttl=yes; done
     args=("$@"); [[ "$ttl" == yes ]] || args+=(--ttl "$RESEARCH_TTL")
     [[ "$topic" != *$'\n'* && ${#topic} -le 500 ]] || die "topic: one line, at most 500 characters"
-    slug="$(slugify "${topic#research-}" | sed 's/-$//')"
+    slug="$(slugify "${topic#research-}" | cut -c1-31 | sed 's/-$//')"  # role names: 40 chars, 9 for research-
     [[ -n "$slug" ]] || die "topic needs letters or digits: $topic"
     role="research-${slug}"
     if [[ -e "${CONF_DIR}/${role}.conf" ]]; then  # existing topic: resume it
