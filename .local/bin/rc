@@ -7,8 +7,10 @@
 # Usage:
 #   rc ls                                   roles with state, sessions, last activity, memory
 #   rc up <role> [--ttl 4h] [--fresh] [--force]  resumes the last session (relay keeps it ~4 h after a stop)
-#   rc down <role> [--force]                refuses while a session was active in the last 15 min
-#   rc restart <role> [--force]
+#   rc down <role> [--wait 10] [--now|--cancel]  stops once .agents/session-handoff.md is newer than the
+#                                           request and the session was quiet for 60 s, at the latest
+#                                           after --wait minutes (forced); --now stops at once
+#   rc restart <role>
 #   rc new <name> [--label L] [--dir D] [--plugins dev,research,travel] [--brief TEXT]
 #          [--description TEXT] [--args "--spawn worktree"]
 #   rc rm <name> [--force]                  custom roles only; keeps the folder
@@ -23,9 +25,17 @@
 #   rc code --new <name> [up options]       creates ~/code/<name> with a minimal AGENTS.md first
 #   rc code --own <project> [up options]    own role code-<project> in the project folder (client repos;
 #                                           needs the repository's own trust)
-#   rc menu                                 running roles, stopped roles, trips, recent projects, RAM
+#   rc research "<topic>" [up options]      role research-<slug> from the helper folder
+#                                           ~/Obsidian/Adrixan/Research/.rc/<slug>: starts a deep research
+#                                           on the topic (report in Research/Reports/), auto-stop after 8 h;
+#                                           an existing topic (slug or role) resumes
+#   rc researches                           research topics, most recently active first
+#   rc research --index                     rewrites Research/index.md from the report frontmatter
+#   rc menu                                 running roles, stopped roles, trips, research, projects, RAM
 #   rc restore                              starts the roles that ran before a reboot (rc up marks them)
-#   rc hook code-session|greeter-start      SessionStart hooks of ~/code and of the Greeter
+#   rc hook code-session|greeter-start|research-session|turn-done
+#                                           SessionStart hooks of ~/code, the Greeter and research topics;
+#                                           Stop hook (global) that asks for a push after long turns
 # <role> is the role name or its label (case-insensitive).
 # ==============================================================================
 
@@ -38,7 +48,9 @@ CODE_DIR="${HOME}/code"
 PROJECTS_DIR="${HOME}/.claude/projects"
 CLAUDE_STATE="${HOME}/.claude.json"
 MIN_AVAILABLE_MB=1024
-BUSY_MINUTES=15
+STOP_WAIT_MIN=10    # rc down: longest wait for the handoff before the stop is forced
+STOP_QUIET_SEC=60   # rc down: the session must have been quiet this long after its handoff
+NOTIFY_MIN_SEC=60   # turn-done hook: only turns at least this long end with a push
 CUSTOM_MARKER="# Created by rc new"
 OPTIONAL_PLUGINS=(dev research travel)
 # One server per folder (a second `claude remote-control` in a folder is refused) and a repository in
@@ -52,6 +64,15 @@ FOCUS_REMOTE="${STATE_DIR}/code-focus-remote"  # cse_<id> of a session -> projec
 PROJECT_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$'
 # Roles started with rc up and not stopped with rc down; the Greeter's start hook brings them back
 WANTED_DIR="${STATE_DIR}/wanted"
+STOPPING_DIR="${STATE_DIR}/stopping"  # <role>: request and deadline epochs of a pending rc down
+TURN_END_DIR="${STATE_DIR}/turn-end"  # <RC_DIR as key>: epoch of the last turn end (Stop hook)
+# Deep research per topic, in parallel: helper folders (hidden from Obsidian) below the trusted Research
+# folder, so they inherit its trust and its CLAUDE.md; the results go to Reports/<date>-<slug>/
+RESEARCH_DIR="${HOME}/Obsidian/Adrixan/Research"
+RESEARCH_SLOTS="${RESEARCH_DIR}/.rc"
+REPORTS_DIR="${RESEARCH_DIR}/Reports"
+RESEARCH_TTL=8h
+RESEARCH_REMOTE="${STATE_DIR}/research-remote"  # cse_<id> of sessions that already got their start turn
 RC_BIN="$(realpath -- "$0")"
 RESUME_HOURS=4
 
@@ -87,11 +108,17 @@ sessions() {  # one `claude --print --sdk-url` child per session
 
 project_dir() { echo "${PROJECTS_DIR}/$(conf_get "$1" RC_DIR | sed 's/[^A-Za-z0-9]/-/g')"; }
 
-last_active_min() {  # minutes since the newest transcript changed, or empty
+last_active_sec() {  # seconds since the newest transcript changed, or empty
     local newest
     # Empty transcripts are standby sessions the server pre-created, not activity
     newest="$(find "$(project_dir "$1")" -maxdepth 1 -name '*.jsonl' -size +0 -printf '%T@\n' 2>/dev/null | sort -n | tail -1)"
-    [[ -n "$newest" ]] && echo $(( ( $(date +%s) - ${newest%.*} ) / 60 ))
+    [[ -n "$newest" ]] && echo $(( $(date +%s) - ${newest%.*} ))
+    return 0
+}
+
+last_active_min() {  # minutes since the newest transcript changed, or empty
+    local sec; sec="$(last_active_sec "$1")"
+    [[ -n "$sec" ]] && echo $(( sec / 60 ))
     return 0
 }
 
@@ -130,13 +157,57 @@ is_trusted() {  # the folder, or for a non-git folder an ancestor, has accepted 
 
 available_mb() { awk '/^MemAvailable/{print int($2/1024)}' /proc/meminfo; }
 
-busy_guard() {  # refuse to end sessions that were active recently
-    local role="$1" force="$2" idle
-    [[ "$force" == yes ]] && return 0
-    idle="$(last_active_min "$role")"
-    if [[ -n "$idle" && "$idle" -lt "$BUSY_MINUTES" && "$(sessions "$role")" -gt 0 ]]; then
-        die "$role had session activity ${idle} min ago; this ends its sessions (use --force)"
-    fi
+dir_key() { sed 's/[^A-Za-z0-9]/-/g' <<< "$1"; }
+
+live_projects() {  # projects the live sessions of the general Code role are focused on
+    local pid s
+    pid="$(main_pid "$1")"
+    [[ "$pid" != 0 ]] || return 0
+    for s in $(pgrep -P "$pid" -f -- '--sdk-url' || true); do
+        focus_of_remote "$(tr '\0' '\n' < "/proc/$s/cmdline" 2>/dev/null | sed -n '/^--session-id$/{n;p;q}')"
+    done
+}
+
+handoff_epoch() {  # newest change of the handoff file(s) a role's sessions write, or 0
+    local dir f p newest=0 t
+    local -a candidates
+    dir="$(conf_get "$1" RC_DIR)"
+    candidates=("$dir/.agents/session-handoff.md")
+    case "$dir" in
+        # The general role: only the projects its live sessions are on, not every project's handoff
+        "$CODE_DIR") while read -r p; do [[ -n "$p" ]] && candidates+=("${CODE_DIR}/${p}/.agents/session-handoff.md"); done < <(live_projects "$1") ;;
+        "$SLOTS_DIR"/*) candidates+=("${CODE_DIR}/${dir#"$SLOTS_DIR"/}/.agents/session-handoff.md") ;;
+    esac
+    for f in "${candidates[@]}"; do
+        t="$(stat -c %Y -- "$f" 2>/dev/null)" || continue  # missing, or renamed away while writing
+        [[ "$t" -gt "$newest" ]] && newest="$t"
+    done
+    echo "$newest"
+}
+
+turn_end_epoch() {  # last turn end of the role's sessions (written by the Stop hook), or 0
+    local f; f="${TURN_END_DIR}/$(dir_key "$(conf_get "$1" RC_DIR)")"
+    if [[ -r "$f" ]]; then head -1 "$f"; else echo 0; fi
+}
+
+stop_pending() {  # deadline epoch of a pending rc down, or empty
+    [[ -f "${STOPPING_DIR}/$1" ]] && systemctl --user is-active --quiet "rc-stop-$1.service" && cut -d' ' -f2 "${STOPPING_DIR}/$1"
+    return 0
+}
+
+cancel_stop() {  # drop a pending rc down; prints a note when there was one
+    local role="$1"
+    [[ -n "$(stop_pending "$role")" ]] && echo "pending stop of $role cancelled"
+    systemctl --user stop "rc-stop-${role}.service" 2>/dev/null || true
+    rm -f -- "${STOPPING_DIR}/${role}"
+}
+
+stop_now() {
+    local role="$1"
+    systemctl --user stop "$(unit "$role")"
+    unwant "$role"
+    systemctl --user stop "rc-ttl-${role}.timer" 2>/dev/null || true
+    rm -f -- "${STOPPING_DIR}/${role}"
 }
 
 cmd_ls() {
@@ -145,6 +216,7 @@ cmd_ls() {
     for f in "${CONF_DIR}"/*.conf; do
         role="$(basename "$f" .conf)"
         state="$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)"
+        [[ -n "$(stop_pending "$role")" ]] && state="stopping"
         [[ "$(conf_get "$role" RC_AUTOSTART)" == yes ]] && state="${state}*"
         sess="-"; mem="-"; idle="$(last_active_min "$role")"
         if [[ "$state" == active* ]]; then sess="$(sessions "$role")"; mem="$(memory_mb "$role")"; fi
@@ -202,6 +274,7 @@ cmd_up() {
         esac
     done
     if systemctl --user is-active --quiet "$(unit "$role")"; then
+        cancel_stop "$role"
         want "$role"
         echo "$role is already running ($(sessions "$role") sessions)"
         return
@@ -219,29 +292,76 @@ cmd_up() {
         systemctl --user stop "rc-ttl-${role}.timer" 2>/dev/null || true
         # rc down, so the expired role is not brought back after a reboot
         systemd-run --user --quiet --unit "rc-ttl-${role}" --on-active="$ttl" --timer-property=AccuracySec=1min \
-            "$RC_BIN" down "$role" --force
+            "$RC_BIN" down "$role" --now
         echo "auto-stop in $ttl"
     fi
     echo "started $role: open the session \"$(conf_get "$role" RC_NAME)\" in the Claude app (appears within about 30 s)"
 }
 
-cmd_down() {
-    local role force=no
+cmd_down() {  # stop after the handoff (bounded wait) or at once; idle notices are not needed
+    local role mode=wait wait="$STOP_WAIT_MIN" now deadline
     role="$(resolve "${1:?role missing}")"; shift
-    [[ "${1:-}" == --force ]] && force=yes
-    systemctl --user is-active --quiet "$(unit "$role")" || { unwant "$role"; echo "$role is not running"; return; }
-    busy_guard "$role" "$force"
-    systemctl --user stop "$(unit "$role")"
-    unwant "$role"
-    systemctl --user stop "rc-ttl-${role}.timer" 2>/dev/null || true
-    echo "stopped $role (starting it again works after about 1 to 2 min)"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --now|--force) mode=now; shift ;;  # --force: name used by older ttl timers
+            --cancel) mode=cancel; shift ;;
+            --wait) wait="${2:?--wait needs minutes}"; shift 2 ;;
+            *) usage ;;
+        esac
+    done
+    [[ "$wait" =~ ^[0-9]{1,3}$ ]] || die "--wait takes whole minutes"
+    if [[ "$mode" == cancel ]]; then
+        cancel_stop "$role"
+        systemctl --user is-active --quiet "$(unit "$role")" && want "$role"
+        return
+    fi
+    systemctl --user is-active --quiet "$(unit "$role")" || { unwant "$role"; rm -f -- "${STOPPING_DIR}/${role}"; echo "$role is not running"; return; }
+    if [[ "$mode" == now || "$(sessions "$role")" -eq 0 ]]; then
+        systemctl --user stop "rc-stop-${role}.service" 2>/dev/null || true
+        stop_now "$role"
+        echo "stopped $role (starting it again works after about 1 to 2 min)"
+        return
+    fi
+    if [[ -n "$(stop_pending "$role")" ]]; then
+        echo "$role is already stopping (at the latest $(date -d "@$(stop_pending "$role")" +%H:%M))"
+        return
+    fi
+    # The request time is taken before the Greeter asks for the handoff, so a quick handoff still counts
+    now="$(date +%s)"; deadline=$(( now + wait * 60 ))
+    mkdir -p "$STOPPING_DIR"
+    echo "$now $deadline" > "${STOPPING_DIR}/${role}"
+    unwant "$role"  # a reboot during the wait must not bring the role back
+    systemctl --user reset-failed "rc-stop-${role}.service" 2>/dev/null || true
+    systemd-run --user --quiet --collect --unit "rc-stop-${role}" "$RC_BIN" stop-wait "$role"
+    echo "stopping $role: as soon as its .agents/session-handoff.md is newer than now and its session has ended that turn and stayed quiet for ${STOP_QUIET_SEC} s, at the latest at $(date -d "@$deadline" +%H:%M) (forced); ask its session for the handoff now"
 }
 
-cmd_restart() {
-    local role force=no
-    role="$(resolve "${1:?role missing}")"; shift
-    [[ "${1:-}" == --force ]] && force=yes
-    busy_guard "$role" "$force"
+cmd_stop_wait() {  # runs in the transient unit rc-stop-<role> that rc down starts
+    local role="$1" req deadline quiet handoff
+    [[ -f "${STOPPING_DIR}/${role}" ]] || exit 0
+    read -r req deadline < "${STOPPING_DIR}/${role}"
+    # Any failure below still stops the role; rc down --cancel (SIGTERM) leaves it running. The trap runs
+    # after this function has returned, so it reads a global
+    STOP_ROLE="$role"
+    trap 'stop_now "$STOP_ROLE"' EXIT
+    trap 'trap - EXIT; exit 0' TERM
+    while systemctl --user is-active --quiet "$(unit "$role")"; do
+        quiet="$(last_active_sec "$role")"; handoff="$(handoff_epoch "$role")"
+        # The turn that wrote the handoff must have ended (a push or test run may follow the handoff)
+        if [[ "$handoff" -ge "$req" && "$(turn_end_epoch "$role")" -ge "$handoff" && "${quiet:-$STOP_QUIET_SEC}" -ge "$STOP_QUIET_SEC" ]]; then
+            echo "handoff written: stopping $role"; break
+        fi
+        if [[ "$(date +%s)" -ge "$deadline" ]]; then
+            echo "no handoff by the deadline: stopping $role anyway"; break
+        fi
+        sleep 10
+    done
+}
+
+cmd_restart() {  # the sessions reattach after the restart, so no handoff is needed
+    local role
+    role="$(resolve "${1:?role missing}")"
+    cancel_stop "$role"
     systemctl --user restart "$(unit "$role")"
     echo "restarted $role (the unit retries for about 1 to 2 min until the relay accepts it)"
 }
@@ -341,6 +461,77 @@ cmd_trips() {
         printf '%s\t%s\t%s\t%s\n' "$(last_active_min "$role")" "$role" "$(conf_get "$role" RC_NAME)" \
             "$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)"
     done | sort -n | awk -F'\t' 'BEGIN{printf "%-26s %-22s %-9s %s\n","ROLE","LABEL","STATE","LAST_ACT"} {printf "%-26s %-22s %-9s %s\n",$2,$3,$4,($1==""?"-":$1"m")}'
+}
+
+report_field() {  # report_field <report.md> <key>: a scalar from the frontmatter, JSON quotes removed
+    local v
+    v="$(sed -n '1{/^---$/!q};2,/^---$/{s/^'"$2"': *//p}' "$1" 2>/dev/null | head -1)"
+    if [[ "$v" == \"*\" ]]; then jq -r '.' <<< "$v" 2>/dev/null || echo "$v"; else echo "$v"; fi
+}
+
+research_report() { echo "${RESEARCH_DIR}/$(cat -- "${RESEARCH_SLOTS}/$1/job")/report.md"; }
+
+research_index() {  # Research/index.md from the frontmatter of every Reports/*/report.md, newest first
+    local r d title status tmp
+    tmp="$(mktemp "${RESEARCH_DIR}/.index.XXXXXX")"
+    {
+        printf '# Research index\n\nGenerated by `rc research --index` from the frontmatter of `Reports/*/report.md`; do not edit by hand.\n\n'
+        printf '| Date | Topic | Status | Report | Sources |\n|---|---|---|---|---|\n'
+        find "$REPORTS_DIR" -mindepth 2 -maxdepth 2 -name report.md -printf '%h\n' 2>/dev/null | sort -r | while IFS= read -r r; do
+            d="$(basename "$r")"
+            title="$(report_field "$r/report.md" title)"; status="$(report_field "$r/report.md" status)"
+            title="${title//|/\\|}"
+            printf '| %s | %s | %s | [[Reports/%s/report\\|report]] | %s |\n' "$(report_field "$r/report.md" date)" \
+                "${title:-$d}" "${status:--}" "$d" "$([[ -f "$r/sources.md" ]] && printf '[[Reports/%s/sources\\|sources]]' "$d" || echo -)"
+        done
+    } > "$tmp"
+    mv -- "$tmp" "${RESEARCH_DIR}/index.md"
+}
+
+research_settings() {  # helper folder settings: the plugins of the Research folder plus the start hook
+    local base="${RESEARCH_DIR}/.claude/settings.json" plugins='{}'
+    [[ -r "$base" ]] && plugins="$(jq -c '.enabledPlugins // {}' "$base")"
+    jq -n --argjson p "$plugins" --arg c "\"\$HOME/.local/bin/rc\" hook research-session" \
+        '{enabledPlugins: $p, hooks: {SessionStart: [{matcher: "startup|resume|compact", hooks: [{type: "command", command: $c}]}]}}'
+}
+
+cmd_research() {
+    local topic="${1:?topic missing (or --index)}" slug role slot job short a args=() ttl=no
+    shift
+    [[ "$topic" == --index ]] && { research_index; echo "wrote ${RESEARCH_DIR}/index.md"; return; }
+    for a in "$@"; do [[ "$a" == --ttl ]] && ttl=yes; done
+    args=("$@"); [[ "$ttl" == yes ]] || args+=(--ttl "$RESEARCH_TTL")
+    [[ "$topic" != *$'\n'* && ${#topic} -le 500 ]] || die "topic: one line, at most 500 characters"
+    slug="$(slugify "${topic#research-}" | sed 's/-$//')"
+    [[ -n "$slug" ]] || die "topic needs letters or digits: $topic"
+    role="research-${slug}"
+    if [[ -e "${CONF_DIR}/${role}.conf" ]]; then  # existing topic: resume it
+        cmd_up "$role" "${args[@]}"
+        return
+    fi
+    slot="${RESEARCH_SLOTS}/${slug}"; job="Reports/$(date +%F)-${slug}"
+    mkdir -p "$slot/.claude" "${RESEARCH_DIR}/${job}"
+    printf '%s\n' "$topic" > "$slot/topic.txt"
+    printf '%s\n' "$job" > "$slot/job"
+    research_settings > "$slot/.claude/settings.json"
+    [[ -e "${RESEARCH_DIR}/${job}/report.md" ]] || printf -- '---\ntitle: %s\ndate: %s\nquestion: %s\nstatus: running\nrole: %s\ntags: [research]\n---\n\nDeep research in progress (role %s).\n' \
+        "$(jq -Rn --arg t "$topic" '$t')" "$(date +%F)" "$(jq -Rn --arg t "$topic" '$t')" "$role" "$role" > "${RESEARCH_DIR}/${job}/report.md"
+    research_index
+    short="$(tr -d '"$`\\' <<< "$topic" | cut -c1-40)"
+    cmd_new "$role" --label "Research: ${short}" --dir "$slot" --description "Deep research: ${short}" --no-files
+    cmd_up "$role" "${args[@]}"
+}
+
+cmd_researches() {
+    local f role slug
+    compgen -G "${CONF_DIR}/research-*.conf" >/dev/null || { echo "no research topics yet: rc research \"<topic>\""; return; }
+    for f in "${CONF_DIR}"/research-*.conf; do
+        role="$(basename "$f" .conf)"; slug="${role#research-}"
+        [[ -f "${RESEARCH_SLOTS}/${slug}/job" ]] || continue
+        printf '%s\t%s\t%s\t%s\t%s\n' "$(last_active_min "$role")" "$slug" \
+            "$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)" \
+            "$(report_field "$(research_report "$slug")" status)" "$(head -1 "${RESEARCH_SLOTS}/${slug}/topic.txt")"
+    done | sort -n | awk -F'\t' 'BEGIN{printf "%-36s %-9s %-9s %-8s %s\n","TOPIC_SLUG","STATE","LAST_ACT","REPORT","TOPIC"} {printf "%-36s %-9s %-9s %-8s %s\n",$2,$3,($1==""?"-":$1"m"),($4==""?"-":$4),$5}'
 }
 
 code_role() { echo "code-$(slugify "$1")"; }
@@ -478,7 +669,91 @@ cmd_restore() {  # start the roles that ran before a reboot; prints one summary 
     return 0
 }
 
+claude_print_only() {  # the hook runs under `claude -p` without Remote Control (scripts, probes)
+    local pid="$PPID" _ args
+    for _ in 1 2 3 4 5 6; do
+        [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -r "/proc/$pid/cmdline" ]] || return 1
+        args="$(tr '\0' '\n' < "/proc/$pid/cmdline")"
+        if [[ "$(head -1 <<< "$args")" == *claude* ]]; then
+            grep -qxE -- '--print|-p' <<< "$args" && ! grep -qx -- '--sdk-url' <<< "$args"
+            return
+        fi
+        pid="$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null || true)"
+    done
+    return 1
+}
+
+hook_turn_done() {  # Stop hook (~/.claude/settings.json): a turn of 1 min+ ends with a push to the app
+    local input transcript start pushed peerstop now
+    input="$(cat)"
+    if [[ -n "${RC_DIR:-}" ]]; then  # turn ends of rc roles: rc down waits for the end of the handoff turn
+        mkdir -p "$TURN_END_DIR"
+        date +%s > "${TURN_END_DIR}/$(dir_key "$RC_DIR")"
+    fi
+    [[ "$(jq -r '.stop_hook_active // false' <<< "$input")" == true ]] && return 0
+    # Waiting for background work (subagents, monitors, shells) means the task is not finished yet
+    [[ "$(jq '[.background_tasks // [] | .[] | select((.status // "running") | test("^(running|pending)$"))] | length' <<< "$input")" -eq 0 ]] || return 0
+    transcript="$(jq -r '.transcript_path // empty' <<< "$input")"
+    [[ -r "$transcript" ]] || return 0
+    claude_print_only && return 0
+    # Turn start: the last prompt (Peter's or a peer session's; system reminders are meta without origin)
+    # or the last answer to AskUserQuestion, which already pushed while it waited
+    read -r start pushed peerstop < <(jq -r '
+        def text: (.message.content | if type == "string" then . else (map(select(.type == "text") | .text) | join(" ")) end);
+        if .type == "user" then
+            if (.message.content | type) == "array" and (.message.content | all(.type == "tool_result")) then "R \(.timestamp)"
+            elif (.isMeta != true) or (.origin != null) then
+                (if (.origin.kind // "") == "peer" and ((.origin.body // text) | test("stopping this role"; "i")) then "S" else "P" end) + " \(.timestamp)"
+            else empty end
+        elif .type == "assistant" then
+            (.message.content // [] | if type == "array" then .[] else empty end | select(.type == "tool_use") |
+             if .name == "AskUserQuestion" then "Q" elif .name == "PushNotification" then "N" else empty end)
+        else empty end' "$transcript" 2>/dev/null | awk '
+        $1 == "P" || $1 == "S" { start = $2; pushed = 0; stop = ($1 == "S"); q = 0 }
+        $1 == "Q" { q = 1 }
+        $1 == "R" && q { start = $2; pushed = 0; q = 0 }
+        $1 == "N" { pushed = 1 }
+        END { print (start == "" ? "-" : start), pushed + 0, stop + 0 }')
+    [[ -n "$start" && "$start" != - && "$pushed" == 0 && "$peerstop" == 0 ]] || return 0
+    start="$(date -d "$start" +%s 2>/dev/null)" || return 0
+    now="$(date +%s)"
+    [[ $(( now - start )) -ge "$NOTIFY_MIN_SEC" ]] || return 0
+    jq -n --arg r "Turn-end notification (rc hook turn-done): this turn ran $(( (now - start) / 60 )) min. Call PushNotification once now (if it is deferred, load it with ToolSearch \"select:PushNotification\"): one sentence in Peter's language saying what finished or what he has to decide, under 120 characters, no names of students or family. Then end the turn with one short line that repeats it. If the tool is unavailable or refused, end the turn with one short line saying so." \
+        '{decision: "block", reason: $r}'
+}
+
+hook_research_session() {  # SessionStart hook of research topic roles (helper folders in Research/.rc)
+    local input src slug slot topic job rid message=""
+    input="$(cat)"
+    case "${RC_DIR:-}" in
+        "$RESEARCH_SLOTS"/*) slug="${RC_DIR#"$RESEARCH_SLOTS"/}" ;;
+        *) return 0 ;;
+    esac
+    slot="${RESEARCH_SLOTS}/${slug}"
+    [[ -r "$slot/topic.txt" && -r "$slot/job" ]] || return 0
+    topic="$(head -1 "$slot/topic.txt")"; job="$(head -1 "$slot/job")"
+    src="$(jq -r '.source // empty' <<< "$input")"
+    rid="$(remote_session_id)"
+    mkdir -p "$RESEARCH_REMOTE"
+    find "$RESEARCH_REMOTE" -maxdepth 1 -type f -mtime +30 -delete
+    if [[ "$src" == startup && ! ( -n "$rid" && -f "${RESEARCH_REMOTE}/${rid}" ) ]]; then
+        if mkdir "$slot/.started" 2>/dev/null; then  # atomic: only the first session starts the research
+            message="[deep-research] Load the deep-research skill and research this topic, then store the result in the job folder as ~/Obsidian/Adrixan/Research/AGENTS.md describes: ${topic}"
+        else
+            message="[deep-research] ${topic}: read report.md, sources.md and the handoff, then reply with a short status (report status, main findings, open questions) and ask what to dig into next."
+        fi
+    fi
+    [[ -n "$rid" ]] && printf '%s\n' "$slug" > "${RESEARCH_REMOTE}/${rid}"
+    jq -n --arg c "Deep-research session on the topic: ${topic}. Job folder: ~/Obsidian/Adrixan/Research/${job} (report.md with frontmatter status running|done, sources.md); follow ~/Obsidian/Adrixan/Research/AGENTS.md for storage, report and privacy rules and run \`rc research --index\` after changing the report. This session's handoff: ${slot/#$HOME/\~}/.agents/session-handoff.md. Peter may later resume this topic with \`rc research ${slug}\` from the Greeter." \
+        --arg m "$message" \
+        '{hookSpecificOutput: ({hookEventName: "SessionStart", additionalContext: $c} + (if $m == "" then {} else {initialUserMessage: $m} end))}'
+}
+
 cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, greeter-start for the Greeter
+    case "${1:-}" in
+        turn-done) hook_turn_done || true; return 0 ;;  # a failing Stop hook must never block a session
+        research-session) hook_research_session; return 0 ;;
+    esac
     if [[ "${1:-}" == greeter-start ]]; then
         local restored
         cat >/dev/null
@@ -522,20 +797,21 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
 }
 
 cmd_menu() {  # one listing for the Greeter's menu
-    local f role idle
-    echo "RUNNING (label | role | sessions | last activity | MB):"
+    local f role idle stop slug
+    echo "RUNNING (label | role | sessions | last activity | MB | pending stop):"
     for f in "${CONF_DIR}"/*.conf; do
         role="$(basename "$f" .conf)"
         [[ "$role" == greeter ]] && continue
         systemctl --user is-active --quiet "$(unit "$role")" || continue
-        idle="$(last_active_min "$role")"
-        printf '  %s | %s | %s | %s | %s\n' "$(conf_get "$role" RC_NAME)" "$role" "$(sessions "$role")" "${idle:+${idle} min ago}" "$(memory_mb "$role")"
+        idle="$(last_active_min "$role")"; stop="$(stop_pending "$role")"
+        printf '  %s | %s | %s | %s | %s%s\n' "$(conf_get "$role" RC_NAME)" "$role" "$(sessions "$role")" "${idle:+${idle} min ago}" "$(memory_mb "$role")" \
+            "${stop:+ | STOPPING, waiting for its handoff until $(date -d "@$stop" +%H:%M)}"
     done
     echo "STOPPED ROLES, most recent first (label | role | last activity):"
     for f in "${CONF_DIR}"/*.conf; do
         role="$(basename "$f" .conf)"
         # Code starts per project and Travel Planner per trip (Peter, 2026-10-29), so neither is offered here
-        [[ "$role" == greeter || "$role" == code || "$role" == travel || "$role" == code-* || "$role" == trip-* ]] && continue
+        [[ "$role" == greeter || "$role" == code || "$role" == travel || "$role" == code-* || "$role" == trip-* || "$role" == research-* ]] && continue
         systemctl --user is-active --quiet "$(unit "$role")" && continue
         idle="$(last_active_min "$role")"
         printf '%s\t  %s | %s | %s\n' "${idle:-999999999}" "$(conf_get "$role" RC_NAME)" "$role" "${idle:+${idle} min ago}"
@@ -548,19 +824,28 @@ cmd_menu() {  # one listing for the Greeter's menu
         printf '%s\t  %s | %s | %s | %s\n' "${idle:-999999999}" "$(conf_get "$role" RC_NAME)" "$role" \
             "$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)" "${idle:+${idle} min ago}"
     done | sort -n | cut -f2-
+    echo "RESEARCH TOPICS, most recent first (label | resume with | state | last activity | report):"
+    for f in "${CONF_DIR}"/research-*.conf; do
+        [[ -e "$f" ]] || continue
+        role="$(basename "$f" .conf)"; slug="${role#research-}"
+        [[ -f "${RESEARCH_SLOTS}/${slug}/job" ]] || continue
+        idle="$(last_active_min "$role")"
+        printf '%s\t  %s | rc research %s | %s | %s | %s\n' "${idle:-999999999}" "$(conf_get "$role" RC_NAME)" "$slug" \
+            "$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)" "${idle:+${idle} min ago}" \
+            "$(report_field "$(research_report "$slug")" status)"
+    done | sort -n | head -5 | cut -f2-
     echo "RECENT PROJECTS in ~/code (name | last used | note):"
     project_rows | head -6 | awk -F'\t' -v now="$(date +%s)" '{printf "  %s | %d d ago | %s\n",$2,(now-$1)/86400,$4}'
     echo "RAM available: $(available_mb) MB"
 }
 
 cmd_rm() {
-    local role force=no
-    role="$(resolve "${1:?role missing}")"; shift
-    [[ "${1:-}" == --force ]] && force=yes
+    local role
+    role="$(resolve "${1:?role missing}")"
     grep -qxF "$CUSTOM_MARKER" "${CONF_DIR}/${role}.conf" || die "$role is predefined (managed by Ansible)"
     if systemctl --user is-active --quiet "$(unit "$role")"; then
-        busy_guard "$role" "$force"
-        systemctl --user stop "$(unit "$role")"
+        systemctl --user stop "rc-stop-${role}.service" 2>/dev/null || true
+        stop_now "$role"
     fi
     echo "removed role $role; its folder stays: $(conf_get "$role" RC_DIR)"
     unwant "$role"
@@ -586,6 +871,9 @@ case "${1:-ls}" in
     trips) cmd_trips ;;
     projects) cmd_projects ;;
     code) shift; cmd_code "$@" ;;
+    research) shift; cmd_research "$@" ;;
+    researches) cmd_researches ;;
+    stop-wait) shift; cmd_stop_wait "${1:?role missing}" ;;
     menu) cmd_menu ;;
     restore) cmd_restore ;;
     *) usage ;;
