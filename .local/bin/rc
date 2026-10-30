@@ -10,6 +10,8 @@
 #   rc down <role> [--wait 10] [--now|--cancel]  stops once .agents/session-handoff.md is newer than the
 #                                           request and the session was quiet for 60 s, at the latest
 #                                           after --wait minutes (forced); --now stops at once
+#   rc handoff-done [--stop] [--file F]     run by a role's session after writing its handoff: the role stops
+#                                           seconds after the turn ends (--stop: request that stop itself)
 #   rc restart <role>
 #   rc new <name> [--label L] [--dir D] [--plugins dev,research,travel] [--brief TEXT]
 #          [--description TEXT] [--args "--spawn worktree"]
@@ -65,7 +67,8 @@ PROJECT_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$'
 # Roles started with rc up and not stopped with rc down; the Greeter's start hook brings them back
 WANTED_DIR="${STATE_DIR}/wanted"
 STOPPING_DIR="${STATE_DIR}/stopping"  # <role>: request and deadline epochs of a pending rc down
-TURN_END_DIR="${STATE_DIR}/turn-end"  # <RC_DIR as key>: epoch of the last turn end (Stop hook)
+TURN_END_DIR="${STATE_DIR}/turn-end"  # <RC_DIR as key> and <cse_id>: epoch of the last turn end (Stop hook)
+DONE_DIR="${STATE_DIR}/handoff-done"  # <role>/<cse_id>: epoch a session reported its handoff (rc handoff-done)
 # Deep research per topic, in parallel: helper folders (hidden from Obsidian) below the trusted Research
 # folder, so they inherit its trust and its CLAUDE.md; the results go to Reports/<date>-<slug>/
 RESEARCH_DIR="${HOME}/Obsidian/Adrixan/Research"
@@ -190,6 +193,36 @@ turn_end_epoch() {  # last turn end of the role's sessions (written by the Stop 
     if [[ -r "$f" ]]; then head -1 "$f"; else echo 0; fi
 }
 
+epoch_file() { if [[ -r "$1" ]]; then head -1 "$1"; else echo 0; fi; }
+
+live_sessions() {  # cse_<id> of every live session of a role
+    local pid s
+    pid="$(main_pid "$1")"
+    [[ "$pid" != 0 ]] || return 0
+    for s in $(pgrep -P "$pid" -f -- '--sdk-url' || true); do
+        tr '\0' '\n' < "/proc/$s/cmdline" 2>/dev/null | sed -n '/^--session-id$/{n;p;q}'
+    done
+}
+
+all_signalled() {  # every live session ran rc handoff-done after the request and has ended that turn
+    local role="$1" req="$2" sid sig n=0
+    while read -r sid; do
+        [[ "$sid" =~ ^cse_[A-Za-z0-9]+$ ]] || continue
+        sig="$(epoch_file "${DONE_DIR}/${role}/${sid}")"
+        [[ "$sig" -ge "$req" && "$(epoch_file "${TURN_END_DIR}/${sid}")" -ge "$sig" ]] || return 1
+        n=$(( n + 1 ))
+    done < <(live_sessions "$role")
+    [[ "$n" -gt 0 ]]
+}
+
+role_of_dir() {  # role served from a folder, or empty
+    local f
+    for f in "${CONF_DIR}"/*.conf; do
+        [[ "$(sed -n 's/^RC_DIR="\(.*\)"$/\1/p' "$f")" == "$1" ]] && { basename "$f" .conf; return 0; }
+    done
+    return 0
+}
+
 stop_pending() {  # deadline epoch of a pending rc down, or empty
     [[ -f "${STOPPING_DIR}/$1" ]] && systemctl --user is-active --quiet "rc-stop-$1.service" && cut -d' ' -f2 "${STOPPING_DIR}/$1"
     return 0
@@ -199,7 +232,7 @@ cancel_stop() {  # drop a pending rc down; prints a note when there was one
     local role="$1"
     [[ -n "$(stop_pending "$role")" ]] && echo "pending stop of $role cancelled"
     systemctl --user stop "rc-stop-${role}.service" 2>/dev/null || true
-    rm -f -- "${STOPPING_DIR}/${role}"
+    rm -rf -- "${STOPPING_DIR:?}/${role}" "${DONE_DIR:?}/${role}"
 }
 
 stop_now() {
@@ -207,7 +240,7 @@ stop_now() {
     systemctl --user stop "$(unit "$role")"
     unwant "$role"
     systemctl --user stop "rc-ttl-${role}.timer" 2>/dev/null || true
-    rm -f -- "${STOPPING_DIR}/${role}"
+    rm -rf -- "${STOPPING_DIR:?}/${role}" "${DONE_DIR:?}/${role}"
 }
 
 cmd_ls() {
@@ -333,7 +366,7 @@ cmd_down() {  # stop after the handoff (bounded wait) or at once; idle notices a
     unwant "$role"  # a reboot during the wait must not bring the role back
     systemctl --user reset-failed "rc-stop-${role}.service" 2>/dev/null || true
     systemd-run --user --quiet --collect --unit "rc-stop-${role}" "$RC_BIN" stop-wait "$role"
-    echo "stopping $role: as soon as its .agents/session-handoff.md is newer than now and its session has ended that turn and stayed quiet for ${STOP_QUIET_SEC} s, at the latest at $(date -d "@$deadline" +%H:%M) (forced); ask its session for the handoff now"
+    echo "stopping $role: right after each of its sessions ran 'rc handoff-done' and ended that turn (without the signal: once the handoff is newer than now and the session was quiet ${STOP_QUIET_SEC} s), at the latest at $(date -d "@$deadline" +%H:%M) (forced); ask its sessions for the handoff now"
 }
 
 cmd_stop_wait() {  # runs in the transient unit rc-stop-<role> that rc down starts
@@ -346,16 +379,58 @@ cmd_stop_wait() {  # runs in the transient unit rc-stop-<role> that rc down star
     trap 'stop_now "$STOP_ROLE"' EXIT
     trap 'trap - EXIT; exit 0' TERM
     while systemctl --user is-active --quiet "$(unit "$role")"; do
+        if all_signalled "$role" "$req"; then
+            echo "handoff signalled by every session: stopping $role"; break
+        fi
         quiet="$(last_active_sec "$role")"; handoff="$(handoff_epoch "$role")"
-        # The turn that wrote the handoff must have ended (a push or test run may follow the handoff)
-        if [[ "$handoff" -ge "$req" && "$(turn_end_epoch "$role")" -ge "$handoff" && "${quiet:-$STOP_QUIET_SEC}" -ge "$STOP_QUIET_SEC" ]]; then
+        # The turn that wrote the handoff must have ended (a push or test run may follow the handoff).
+        # One file cannot speak for several sessions: those need every signal, or the deadline
+        if [[ "$(sessions "$role")" -le 1 && "$handoff" -ge "$req" && "$(turn_end_epoch "$role")" -ge "$handoff" && "${quiet:-$STOP_QUIET_SEC}" -ge "$STOP_QUIET_SEC" ]]; then
             echo "handoff written: stopping $role"; break
         fi
         if [[ "$(date +%s)" -ge "$deadline" ]]; then
             echo "no handoff by the deadline: stopping $role anyway"; break
         fi
-        sleep 10
+        sleep 2
     done
+}
+
+cmd_handoff_done() {  # run by a session after writing its handoff: the role stops right after this turn
+    local stop=no file="" role rid f t newest=0
+    local -a candidates
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --stop) stop=yes; shift ;;
+            --file) file="${2:?--file needs a path}"; shift 2 ;;
+            *) usage ;;
+        esac
+    done
+    [[ -n "${RC_DIR:-}" ]] || die "only for sessions of rc roles (RC_DIR is not set)"
+    role="$(role_of_dir "$RC_DIR")"
+    [[ -n "$role" ]] || die "no role serves $RC_DIR"
+    rid="$(remote_session_id)"
+    [[ -n "$rid" ]] || die "no remote-control session found above this process"
+    candidates=("$PWD/.agents/session-handoff.md")
+    t="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$t" ]] && candidates+=("$t/.agents/session-handoff.md")
+    [[ -n "$file" ]] && candidates+=("$file")
+    for f in "${candidates[@]}"; do
+        t="$(stat -c %Y -- "$f" 2>/dev/null)" || continue
+        [[ "$t" -gt "$newest" ]] && newest="$t"
+    done
+    t="$(handoff_epoch "$role")"; [[ "$t" -gt "$newest" ]] && newest="$t"
+    [[ $(( $(date +%s) - newest )) -le 1800 ]] || die "no handoff written in the last 30 min: update .agents/session-handoff.md first (or pass --file <path>)"
+    if [[ -z "$(stop_pending "$role")" ]]; then
+        if [[ "$stop" == yes ]]; then
+            cmd_down "$role" >/dev/null
+        else
+            echo "handoff noted; no stop is pending for $role, so it keeps running"
+            return 0
+        fi
+    fi
+    mkdir -p "${DONE_DIR}/${role}"
+    date +%s > "${DONE_DIR}/${role}/${rid}"
+    echo "handoff noted: $role stops a few seconds after this turn ends (once every session of the role has signalled; at the latest $(date -d "@$(stop_pending "$role")" +%H:%M)). End the turn now with one short line."
 }
 
 cmd_restart() {  # the sessions reattach after the restart, so no handoff is needed
@@ -591,8 +666,8 @@ focus_of_remote() {  # project a session (cse_<id>) is focused on, or empty
 }
 
 remote_session_id() {  # cse_<id> of the `claude --sdk-url` process this hook runs under
-    local pid="$PPID" i id
-    for i in 1 2 3 4 5 6; do
+    local pid="$PPID" _ id
+    for _ in 1 2 3 4 5 6; do
         [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -r "/proc/$pid/cmdline" ]] || return 0
         id="$(tr '\0' '\n' < "/proc/$pid/cmdline" | sed -n '/^--session-id$/{n;p;q}')"
         [[ "$id" =~ ^cse_[A-Za-z0-9]+$ ]] && { echo "$id"; return 0; }
@@ -687,8 +762,14 @@ hook_turn_done() {  # Stop hook (~/.claude/settings.json): a turn of 1 min+ ends
     local input transcript start pushed peerstop now
     input="$(cat)"
     if [[ -n "${RC_DIR:-}" ]]; then  # turn ends of rc roles: rc down waits for the end of the handoff turn
+        local rid role
         mkdir -p "$TURN_END_DIR"
         date +%s > "${TURN_END_DIR}/$(dir_key "$RC_DIR")"
+        rid="$(remote_session_id)"
+        [[ -n "$rid" ]] && date +%s > "${TURN_END_DIR}/${rid}"
+        # A session that signalled its handoff is about to be stopped: no push turn in between
+        role="$(role_of_dir "$RC_DIR")"
+        [[ -n "$rid" && -n "$role" && -f "${DONE_DIR}/${role}/${rid}" ]] && return 0
     fi
     [[ "$(jq -r '.stop_hook_active // false' <<< "$input")" == true ]] && return 0
     # Waiting for background work (subagents, monitors, shells) means the task is not finished yet
@@ -874,6 +955,7 @@ case "${1:-ls}" in
     research) shift; cmd_research "$@" ;;
     researches) cmd_researches ;;
     stop-wait) shift; cmd_stop_wait "${1:?role missing}" ;;
+    handoff-done) shift; cmd_handoff_done "$@" ;;
     menu) cmd_menu ;;
     restore) cmd_restore ;;
     *) usage ;;

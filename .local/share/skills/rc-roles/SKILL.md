@@ -17,14 +17,21 @@ busy-session guards.
   `.agents/session-handoff.md`); `--ttl` stops the role automatically; `--fresh` starts a new session on
   purpose; `--force` skips the RAM guard (1 GB available). Pass on the resume line `rc up` prints.
 - `rc down <role> [--wait 10] [--now|--cancel]`: with sessions running it returns at once and a
-  background unit `rc-stop-<role>` stops the role as soon as its `.agents/session-handoff.md` (for code
-  project roles the project's, for the general Code role the projects its live sessions are on) is newer
-  than the request, the turn that wrote it has ended (the global Stop hook records turn ends) and the
-  session has been quiet for 60 s; at the latest after `--wait` minutes (default 10) it stops anyway.
+  background unit `rc-stop-<role>` stops the role within seconds once every live session has run
+  `rc handoff-done` and ended that turn. Fallback for a role with one session that does not signal: its
+  `.agents/session-handoff.md` (for code project roles the project's, for the general Code role the
+  projects its live sessions are on) is newer than the request, that turn has ended (the global Stop hook
+  records turn ends) and the session has been quiet for 60 s. At the latest after `--wait` minutes
+  (default 10) it stops anyway.
   Without sessions, or with `--now`, it stops at once; `--cancel` drops a pending stop, and so do `rc up`
   and `rc restart` of that role. The role is no longer restored after a reboot once the stop is
   requested. `rc menu` and `rc ls` show pending stops. No idle notice is needed. `rc restart <role>`
   restarts at once (the sessions reattach).
+- `rc handoff-done [--stop] [--file <path>]`: run by a role's session after writing its handoff. It refuses
+  when no handoff was written in the last 30 min (`--file` names a handoff outside the usual places) and
+  records the signal for this session; with a stop pending, the role stops seconds after the turn ends.
+  Without a pending stop it changes nothing, unless `--stop` is given, which requests the stop itself:
+  for a session Peter tells directly to stop. The signalling turn sends no push.
 - `rc new <name> --label "…" --plugins dev,research,travel --brief "…" [--description "…"] [--args "--spawn worktree"]`:
   creates `~/Obsidian/Adrixan/AI/Roles/<name>` with `AGENTS.md` (the brief) and plugin settings. The core
   plugin (GitHub, memory, fetch, Nextcloud, mail, docs) is always on.
@@ -78,9 +85,10 @@ busy-session guards.
   when it stopped less than about 4 h earlier; the Greeter offers them only when they are stopped.
 - Stopping a role with sessions: run `rc down <role>` first (it records the request time and starts the
   bounded wait), then find its sessions with `ListAgents` (the names start with the role folder's name)
-  and send every one of them with `SendMessage`: "The Greeter is stopping this role: update `.agents/session-handoff.md`
-  (trajectory, intent, open decisions, next steps) now; the role stops automatically once the handoff is
-  written." No `notify_when_idle`. If no session is listed, use `rc down <role> --now` and say the
+  and send every one of them with `SendMessage`: "The Greeter is stopping this role: update
+  `.agents/session-handoff.md` (trajectory, intent, open decisions, next steps) now, then run
+  `rc handoff-done` and end the turn with one short line; the role stops seconds later." No
+  `notify_when_idle`. If no session is listed, use `rc down <role> --now` and say the
   handoff may be missing. Peter saying "stop now" or "force" means `--now`.
 - The RAM guard of `rc up` stays: never add `--force` to `rc up` on your own; report the refusal and ask.
 - Before `rc new`, settle in one question: name, label, plugins (suggest based on the purpose: code →
