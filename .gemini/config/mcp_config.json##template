@@ -7,6 +7,7 @@
       },
       "disabled": false
     },
+    "cloudflare": {"serverUrl": "https://mcp.cloudflare.com/mcp", "disabled": false},
     "context7": {
       "serverUrl": "https://mcp.context7.com/mcp",
       "disabled": false
@@ -173,7 +174,7 @@
     "youtube-transcript": {"serverUrl": "http://127.0.0.1:8790/servers/youtube-transcript/mcp", "disabled": false},
     "oebb": {"serverUrl": "http://127.0.0.1:8790/servers/oebb/mcp", "disabled": true},
     "thunderbird": {"serverUrl": "http://127.0.0.1:8790/servers/thunderbird/mcp", "disabled": false},
-    "garmin": {"serverUrl": "http://127.0.0.1:8790/servers/garmin/mcp", "disabled": true},
+    "garmin": {"serverUrl": "http://127.0.0.1:8790/servers/garmin/mcp", "disabledTools": ["upload_course"], "disabled": false},
     "trip-scout": {"serverUrl": "http://127.0.0.1:8790/servers/trip-scout/mcp", "disabled": false},
     "trip-planner": {"serverUrl": "http://127.0.0.1:8790/servers/trip-planner/mcp", "disabled": false}
 {% endif %}

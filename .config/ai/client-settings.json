@@ -10,7 +10,8 @@
     { "serverName": "plugin:workstation-dev:serena" },
     { "serverName": "file-accountant" },
     { "serverName": "ptsd" },
-    { "serverName": "garmin" }
+    { "serverName": "garmin" },
+    { "serverName": "plugin:cloudflare:cloudflare" }
   ],
   "disableClaudeAiConnectors": true
 }
