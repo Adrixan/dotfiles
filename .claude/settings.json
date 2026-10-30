@@ -20,19 +20,39 @@
     ],
     "defaultMode": "auto"
   },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.local/bin/rc\" hook turn-done",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  },
   "enableWorkflows": true,
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": true,
     "workstation-mcp@workstation": true,
     "workstation-dev@workstation": true,
     "workstation-research@workstation": true,
-    "workstation-travel@workstation": true
+    "workstation-travel@workstation": true,
+    "cloudflare@cloudflare": true
   },
   "extraKnownMarketplaces": {
     "workstation": {
       "source": {
         "source": "directory",
         "path": "/home/Adrixan/.config/ai/claude-plugins"
+      }
+    },
+    "cloudflare": {
+      "source": {
+        "source": "github",
+        "repo": "cloudflare/skills"
       }
     }
   },
@@ -78,19 +98,6 @@
       "**Trusted repo**: /home/Adrixan/Obsidian/Adrixan/Teaching (no remotes configured — local-only repo)",
       "**Org-specific CLIs**: None configured",
       "**Routine under /home/Adrixan/Obsidian/Adrixan/Teaching/ prefix**: workspace scratch files belong in `.scratch/` per global CLAUDE.md convention; `.agents/` session-handoff state files are routine read/write locations"
-    ]
-  },
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$HOME/.local/bin/rc\" hook turn-done",
-            "timeout": 15
-          }
-        ]
-      }
     ]
   }
 }
