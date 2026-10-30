@@ -17,8 +17,9 @@
 #                                           (created on first use, resumed later)
 #   rc trips                                trip roles, most recently active first
 #   rc projects                             folders in ~/code, most recently used first
-#   rc code <project> [up options]          a Code session (role code, served from ~/code, so no extra
-#                                           trust) focused on ~/code/<project>
+#   rc code <project> [up options]          role code-<project>, served from the helper folder
+#                                           ~/code/.rc/<project> (inherits the ~/code trust), any
+#                                           number in parallel
 #   rc code --new <name> [up options]       creates ~/code/<name> with a minimal AGENTS.md first
 #   rc code --own <project> [up options]    own role code-<project> in the project folder (client repos;
 #                                           needs the repository's own trust)
@@ -40,14 +41,14 @@ MIN_AVAILABLE_MB=1024
 BUSY_MINUTES=15
 CUSTOM_MARKER="# Created by rc new"
 OPTIONAL_PLUGINS=(dev research travel)
-# One server per folder (a second `claude remote-control` in ~/code is refused), so every project
-# shares the code role's server; `rc code` queues a focus ticket that the next new session takes
+# One server per folder (a second `claude remote-control` in a folder is refused) and a repository in
+# ~/code is untrusted on its own, so each project runs in a helper folder ~/code/.rc/<project>: not a
+# git repository, so it inherits the ~/code trust; auto mode edits the project outside that folder
+SLOTS_DIR="${CODE_DIR}/.rc"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-rc"
-FOCUS_PENDING="${STATE_DIR}/code-focus-pending"
 FOCUS_SESSIONS="${STATE_DIR}/code-focus-sessions"
 FOCUS_LOG="${STATE_DIR}/code-focus.log"
 FOCUS_REMOTE="${STATE_DIR}/code-focus-remote"  # cse_<id> of a session -> project
-FOCUS_TTL_MIN=30
 PROJECT_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$'
 # Roles started with rc up and not stopped with rc down; the Greeter's start hook brings them back
 WANTED_DIR="${STATE_DIR}/wanted"
@@ -353,13 +354,18 @@ project_name() {  # exact or case-insensitive folder name in ~/code ("linguafusi
     echo "$match"
 }
 
-client_repo() {  # claude-client-init settings, which a session started in ~/code would not load
+client_repo() {  # claude-client-init settings, which a session started outside the repo would not load
     local s="$1/.claude/settings.json"
     [[ -r "$s" ]] && jq -e '((.deniedMcpServers // []) | length > 0) or .disableClaudeAiConnectors == true' "$s" >/dev/null
 }
 
+transcript_epoch() {  # newest non-empty transcript of sessions started in the folder, or empty
+    find "${PROJECTS_DIR}/$(sed 's/[^A-Za-z0-9]/-/g' <<< "$1")" -maxdepth 1 -name '*.jsonl' -size +0 -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1
+    return 0
+}
+
 project_rows() {  # TSV: last use (epoch), project, git, note; most recent first
-    local d name act git note role t p
+    local d name act slot_act git note role t p
     local -A focused=()
     if [[ -r "$FOCUS_LOG" ]]; then  # chronological, so the last line per project wins
         while IFS=$'\t' read -r t p; do [[ "$t" =~ ^[0-9]+$ && -n "$p" ]] && focused[$p]="$t"; done < "$FOCUS_LOG"
@@ -367,16 +373,16 @@ project_rows() {  # TSV: last use (epoch), project, git, note; most recent first
     for d in "${CODE_DIR}"/*/; do
         d="${d%/}"; name="$(basename "$d")"
         if [[ -e "$d/.git" ]]; then git=yes; else git=no; fi
-        # Last Claude session (bulk commits across all repos make commit dates useless): a focused ~/code
-        # session or an own role's transcript, else the last commit
-        act="$(find "${PROJECTS_DIR}/$(sed 's/[^A-Za-z0-9]/-/g' <<< "$d")" -maxdepth 1 -name '*.jsonl' -size +0 -printf '%T@\n' 2>/dev/null | sort -n | tail -1 || true)"
-        act="${act%.*}"
+        # Last Claude session (bulk commits across all repos make commit dates useless): in the repo, in
+        # its helper folder or focused from the general Code role, else the last commit
+        act="$(transcript_epoch "$d")"; slot_act="$(transcript_epoch "${SLOTS_DIR}/${name}")"
+        [[ "${slot_act:-0}" -gt "${act:-0}" ]] && act="$slot_act"
         [[ "${focused[$name]:-0}" -gt "${act:-0}" ]] && act="${focused[$name]}"
         [[ -n "$act" ]] || act="$(git -C "$d" log -1 --format=%ct 2>/dev/null || stat -c %Y "$d")"
         note="-"
         client_repo "$d" && note="client repo: rc code --own"
         role="$(code_role "$name")"
-        [[ -e "${CONF_DIR}/${role}.conf" ]] && note="own role ${role}: $(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)"
+        if [[ -e "${CONF_DIR}/${role}.conf" ]] && systemctl --user is-active --quiet "$(unit "$role")"; then note="running"; fi
         printf '%s\t%s\t%s\t%s\n' "$act" "$name" "$git" "$note"
     done | sort -rn
 }
@@ -388,26 +394,8 @@ cmd_projects() {
     echo "Start one with: rc code <project>   New project: rc code --new <name>   Client repo: rc code --own <project>"
 }
 
-queue_focus() {  # focus ticket for the next new Code session; prints its path
-    local ticket
-    mkdir -p "$FOCUS_PENDING"
-    ticket="${FOCUS_PENDING}/$(date +%s%N)"
-    printf '%s\n' "$1" > "$ticket"
-    echo "$ticket"
-}
-
 focus_of_remote() {  # project a session (cse_<id>) is focused on, or empty
     [[ "$1" =~ ^cse_[A-Za-z0-9]+$ && -f "${FOCUS_REMOTE}/$1" ]] && cat -- "${FOCUS_REMOTE}/$1"
-    return 0
-}
-
-live_session_for() {  # cse_<id> of a running Code session focused on the project, or empty
-    local pid rid
-    pid="$(main_pid code)"
-    [[ "$pid" != 0 ]] || return 0
-    for rid in $({ pgrep -a -P "$pid" -f -- '--sdk-url' || true; } | grep -o -- '--session-id cse_[A-Za-z0-9]*' | cut -d' ' -f2); do
-        [[ "$(focus_of_remote "$rid")" == "$1" ]] && { echo "$rid"; return 0; }
-    done
     return 0
 }
 
@@ -422,8 +410,15 @@ remote_session_id() {  # cse_<id> of the `claude --sdk-url` process this hook ru
     return 0
 }
 
+make_slot() {  # helper folder of a project role: only the focus hook, written by rc
+    mkdir -p "$1/.claude"
+    jq -n --arg c "\"\$HOME/.local/bin/rc\" hook code-session" \
+        '{hooks: {SessionStart: [{matcher: "startup|resume|compact", hooks: [{type: "command", command: $c}]}]}}' \
+        > "$1/.claude/settings.json"
+}
+
 cmd_code() {
-    local project="${1:?project missing}" own=no dir role ticket rid hours
+    local project="${1:?project missing}" own=no dir role slot
     shift
     if [[ "$project" == --own ]]; then own=yes; project="${1:?project missing}"; shift; fi
     if [[ "$project" == --new ]]; then
@@ -440,46 +435,28 @@ cmd_code() {
         project="$(project_name "$project")"
     fi
     dir="${CODE_DIR}/${project}"
-    if [[ "$own" == yes ]]; then
-        role="$(code_role "$project")"
-        if [[ ! -e "${CONF_DIR}/${role}.conf" ]]; then
-            cmd_new "$role" --label "Code: ${project}" --dir "$dir" --description "Code project ${project}" --no-files
-        fi
+    role="$(code_role "$project")"
+    if [[ -e "${CONF_DIR}/${role}.conf" ]]; then  # existing project role (helper folder or --own)
+        [[ "$own" == yes && "$(conf_get "$role" RC_DIR)" != "$dir" ]] && die "$role runs from its helper folder: rc rm $role first"
         cmd_up "$role" "$@"
         return
     fi
-    client_repo "$dir" && die "$project is a client repository: a session started in ~/code would bypass its MCP and connector denials; use rc code --own $project (needs the repository's own trust)"
-    if systemctl --user is-active --quiet "$(unit code)"; then
-        [[ $# -eq 0 ]] || echo "Code is already running, so '$*' does not apply"
-        rid="$(live_session_for "$project")"
-        if [[ -n "$rid" ]]; then
-            echo "$project already has a running Code session: open https://claude.ai/code/session_${rid#cse_}"
-            return
-        fi
-        queue_focus "$project" >/dev/null
-        echo "Code is running: in the Claude app open the Code environment and start a new session; it opens on $project (the focus waits ${FOCUS_TTL_MIN} min for that session)"
-        return
+    if [[ "$own" == yes ]]; then
+        cmd_new "$role" --label "Code: ${project}" --dir "$dir" --description "Code project ${project} (own role in the repo)" --no-files
+    else
+        client_repo "$dir" && die "$project is a client repository: a session started outside it would bypass its MCP and connector denials; use rc code --own $project (needs the repository's own trust)"
+        slot="${SLOTS_DIR}/${project}"
+        make_slot "$slot"
+        cmd_new "$role" --label "Code: ${project}" --dir "$slot" --description "Code project ${project}" --no-files
     fi
-    rid="$(jq -r '.sessionId // empty' "$(project_dir code)/bridge-pointer.json" 2>/dev/null || true)"
-    rid="cse_${rid#session_}"
-    hours="$(stopped_hours code)"
-    if [[ -n "$hours" && "$hours" -lt "$RESUME_HOURS" && "$(focus_of_remote "$rid")" == "$project" ]]; then
-        cmd_up code "$@"
-        echo "the previous session on $project comes back"
-        return
-    fi
-    ticket="$(queue_focus "$project")"
-    trap 'rm -f -- "$ticket"' EXIT  # a refused start must not leave the ticket for a later session
-    cmd_up code --fresh "$@"
-    trap - EXIT
-    echo "the session \"$(conf_get code RC_NAME)\" opens on $project"
+    cmd_up "$role" "$@"
 }
 
-focus_context() {  # additionalContext for a Code session focused on ~/code/<project>
-    local p="$1" d="${CODE_DIR}/$1" extra=""
+focus_context() {  # additionalContext for a session focused on ~/code/<project>
+    local p="$1" d="${CODE_DIR}/$1" from="$2" extra=""
     compgen -G "$d/.claude/settings*.json" >/dev/null && extra+=" Its .claude/ settings (permissions, hooks, plugins) are not loaded in this session: follow them by hand where they matter."
-    [[ -e "$d/.mcp.json" ]] && extra+=" Its .mcp.json servers are not loaded; if a task needs them, ask Peter to start \`rc code --own $p\`."
-    printf '%s' "Code role session focused on the project $p (~/code/$p). It runs from ~/code so no extra workspace trust is needed; treat ~/code/$p as the project root: read its AGENTS.md (or CLAUDE.md) and .agents/ state files before acting, run commands and git there (cd ~/code/$p), and keep its handoff in ~/code/$p/.agents/session-handoff.md. Touch other ~/code projects only when Peter asks.$extra"
+    [[ -e "$d/.mcp.json" ]] && extra+=" Its .mcp.json servers are not loaded; if a task needs them, ask Peter to start \`rc code --own $p\` (needs the repository's own trust)."
+    printf '%s' "Code session focused on the project $p (~/code/$p). It runs from $from, which inherits the ~/code trust, so no extra approval is needed; treat ~/code/$p as the project root: read its AGENTS.md (or CLAUDE.md) and .agents/ state files before acting, run commands and git there (cd ~/code/$p), and keep its handoff in ~/code/$p/.agents/session-handoff.md. Touch other ~/code projects only when Peter asks.$extra"
 }
 
 cmd_restore() {  # start the roles that ran before a reboot; prints one summary line, or nothing
@@ -501,7 +478,7 @@ cmd_restore() {  # start the roles that ran before a reboot; prints one summary 
     return 0
 }
 
-cmd_hook() {  # SessionStart hooks: code-session for ~/code, greeter-start for the Greeter
+cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, greeter-start for the Greeter
     if [[ "${1:-}" == greeter-start ]]; then
         local restored
         cat >/dev/null
@@ -511,39 +488,34 @@ cmd_hook() {  # SessionStart hooks: code-session for ~/code, greeter-start for t
         return 0
     fi
     [[ "${1:-}" == code-session ]] || usage
-    local input src sid rid ticket claim project="" context message="" fresh=no
+    local input src sid rid project="" context message="" seen=no
     input="$(cat)"
-    [[ "${RC_DIR:-}" == "$CODE_DIR" ]] || return 0  # an interactive `claude` in ~/code stays untouched
+    case "${RC_DIR:-}" in  # only sessions of rc's servers; an interactive `claude` stays untouched
+        "$CODE_DIR") ;;
+        "$SLOTS_DIR"/*) project="${RC_DIR#"$SLOTS_DIR"/}" ;;
+        *) return 0 ;;
+    esac
     src="$(jq -r '.source // empty' <<< "$input")"
     sid="$(jq -r '.session_id // empty' <<< "$input")"
     [[ "$sid" =~ ^[A-Za-z0-9_-]{1,100}$ ]] || sid=""
-    rid="$(remote_session_id)"  # stable across reattaching after a Code restart
-    mkdir -p "$FOCUS_PENDING" "$FOCUS_SESSIONS" "$FOCUS_REMOTE"
-    find "$FOCUS_REMOTE" -maxdepth 1 -type f -mtime +30 -delete
-    project="$(focus_of_remote "$rid")"
-    if [[ -n "$project" ]]; then
-        :
-    elif [[ -n "$sid" && -f "${FOCUS_SESSIONS}/${sid}" ]]; then
-        project="$(<"${FOCUS_SESSIONS}/${sid}")"
-    elif [[ "$src" == startup ]]; then
-        find "$FOCUS_PENDING" -maxdepth 1 -type f -name '[0-9]*' -mmin "+${FOCUS_TTL_MIN}" -delete
-        find "$FOCUS_SESSIONS" -maxdepth 1 -type f -mtime +30 -delete
-        claim="${FOCUS_PENDING}/.claim-$$"
-        for ticket in "$FOCUS_PENDING"/[0-9]*; do  # oldest first; mv is atomic, so two sessions never share one
-            [[ -f "$ticket" ]] && mv -- "$ticket" "$claim" 2>/dev/null || continue
-            project="$(<"$claim")"; rm -f -- "$claim"; fresh=yes
-            break
-        done
+    rid="$(remote_session_id)"  # stable when a restart reattaches the session
+    mkdir -p "$FOCUS_SESSIONS" "$FOCUS_REMOTE"
+    find "$FOCUS_REMOTE" "$FOCUS_SESSIONS" -maxdepth 1 -type f -mtime +30 -delete
+    if [[ -z "$project" ]]; then  # general Code role: the focus a session chose earlier, if any
+        project="$(focus_of_remote "$rid")"
+        [[ -z "$project" && -n "$sid" && -f "${FOCUS_SESSIONS}/${sid}" ]] && project="$(<"${FOCUS_SESSIONS}/${sid}")"
     fi
+    [[ -n "$(focus_of_remote "$rid")" || ( -n "$sid" && -f "${FOCUS_SESSIONS}/${sid}" ) ]] && seen=yes
     [[ "$project" =~ $PROJECT_RE && -d "${CODE_DIR}/${project}" ]] || project=""
     if [[ -n "$project" ]]; then
         [[ -n "$sid" ]] && printf '%s\n' "$project" > "${FOCUS_SESSIONS}/${sid}"
         [[ -n "$rid" ]] && printf '%s\n' "$project" > "${FOCUS_REMOTE}/${rid}"
         printf '%s\t%s\n' "$(date +%s)" "$project" >> "$FOCUS_LOG"
-        context="$(focus_context "$project")"
-        [[ "$fresh" == yes ]] && message="[code-focus] ${project}: read the project's AGENTS.md and .agents/ state, then reply with a short status (branch, uncommitted changes, next steps from the handoff) and ask what to do."
+        context="$(focus_context "$project" "${RC_DIR/#$HOME/\~}")"
+        # A reattached session already knows its project; a new one starts with a status turn
+        [[ "$src" == startup && "$seen" == no ]] && message="[code-focus] ${project}: read the project's AGENTS.md and .agents/ state, then reply with a short status (branch, uncommitted changes, next steps from the handoff) and ask what to do."
     else
-        context="Code role session in ~/code without a chosen project. Unless Peter's first message names one, ask with AskUserQuestion which folder in ~/code to work on: run \`rc projects\` and offer the three most recently used by folder name plus \"New project\" (create ~/code/<name> with AGENTS.md and a CLAUDE.md containing @AGENTS.md); his free text takes any name. Then treat that folder as the project root: read its AGENTS.md and .agents/ state first, run commands and git there, keep its handoff in its .agents/. Projects whose .claude/settings.json denies MCP servers (client repositories) are off limits here: they need \`rc code --own <project>\`."
+        context="General Code role session in ~/code without a chosen project. Unless Peter's first message names one, ask with AskUserQuestion which folder in ~/code to work on: run \`rc projects\` and offer the three most recently used by folder name plus \"New project\" (create ~/code/<name> with AGENTS.md and a CLAUDE.md containing @AGENTS.md); his free text takes any name. Then treat that folder as the project root: read its AGENTS.md and .agents/ state first, run commands and git there, keep its handoff in its .agents/. For a dedicated session per project (several in parallel), Peter uses the Greeter or \`rc code <project>\`. Projects whose .claude/settings.json denies MCP servers (client repositories) are off limits here: they need \`rc code --own <project>\`."
     fi
     jq -n --arg c "$context" --arg m "$message" \
         '{hookSpecificOutput: ({hookEventName: "SessionStart", additionalContext: $c} + (if $m == "" then {} else {initialUserMessage: $m} end))}'
