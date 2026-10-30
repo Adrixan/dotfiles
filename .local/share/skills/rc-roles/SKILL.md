@@ -26,21 +26,19 @@ busy-session guards.
   use (folder `~/Obsidian/Adrixan/Travel/Trips/<slug>` with the trip brief, travel and research plugins)
   and starts or resumes it later; `rc trips` lists them. Each trip keeps `trip.md` and its handoff in its
   folder, so it can be restored after any pause.
-- Code projects: every Code session starts from `~/code` (trusted once), so no project needs its own
-  trust. `rc projects` lists the folders in `~/code`, most recently used first. `rc code <project>`
-  queues a focus ticket and starts the `code` role with a fresh session that opens on that project;
-  if Code already runs, the ticket waits 30 min for the next new session Peter starts in the Code
-  environment of the Claude app (one server per folder: a second `claude remote-control` in `~/code`
-  is refused). The SessionStart hook in `~/code/.claude/settings.json` (`rc hook code-session`) hands
-  the ticket to that session and keeps the focus on resume and compaction; a session without a ticket
-  asks Peter for the project. `rc code --new <name>` creates `~/code/<name>` with a minimal `AGENTS.md`
-  first. Client repositories (`.claude/settings.json` with MCP or connector denials from
-  `claude-client-init`) are refused, because a session from `~/code` would not load those denials: they
-  need `rc code --own <project>`, the role `code-<project>` in the repo folder, which needs the repo's own
-  trust. A repo's `.claude/` settings and `.mcp.json` are not loaded in `~/code` sessions either.
-  Resume: when Code runs and the project already has a session, `rc code` prints that session's link
-  instead of queueing a new one; when Code is stopped and its last session (the one a restart reattaches)
-  was on that project, `rc code` resumes it (within about 4 h), otherwise a fresh session opens on it.
+- Code projects, any number in parallel: `rc code <project>` creates and starts the role `code-<project>`
+  (session "Code: <project>"), served from the helper folder `~/code/.rc/<project>`. Only one server
+  per folder is possible and a repository in `~/code` is untrusted on its own, but the helper folder is
+  not a git repository, so it inherits the `~/code` trust; auto mode edits `~/code/<project>` from there
+  (no trust or permission entries are written). Its `.claude/settings.json`, written by rc, holds only the
+  SessionStart hook (`rc hook code-session`) that gives the session its project focus and, when it is
+  new, a status turn. Each role resumes its own previous session like any role. `rc projects` lists
+  the folders in `~/code`, most recently used first. `rc code --new <name>` creates `~/code/<name>` with a
+  minimal `AGENTS.md` first. Client repositories (`.claude/settings.json` with MCP or connector denials
+  from `claude-client-init`) are refused, because a session outside the repo would not load those
+  denials: they need `rc code --own <project>`, a role in the repo folder itself, which needs the repo's
+  own trust. A repo's `.claude/` settings and `.mcp.json` are not loaded in helper-folder sessions either.
+  The general `code` role (`~/code`) stays for cross-project work; its sessions ask for a project.
 - `rc menu`: running roles, stopped fixed and custom roles, trips, recent projects and free RAM in one
   listing (the Greeter's menu).
 - Roles return after a reboot: `rc up` marks a role as wanted, `rc down`, `rc rm` and an expired `--ttl`
