@@ -1,17 +1,50 @@
 {
   "deniedMcpServers": [
-    { "serverName": "plugin:workstation-mcp:memory" },
-    { "serverName": "plugin:workstation-mcp:nextcloud" },
-    { "serverName": "plugin:workstation-mcp:zotero" },
-    { "serverName": "plugin:workstation-mcp:arxiv" },
-    { "serverName": "plugin:workstation-mcp:serena" },
-    { "serverName": "plugin:workstation-research:zotero" },
-    { "serverName": "plugin:workstation-research:arxiv" },
-    { "serverName": "plugin:workstation-dev:serena" },
-    { "serverName": "file-accountant" },
-    { "serverName": "ptsd" },
-    { "serverName": "garmin" },
-    { "serverName": "plugin:cloudflare:cloudflare" }
+    {
+      "serverName": "plugin:workstation-mcp:memory"
+    },
+    {
+      "serverName": "plugin:workstation-mcp:nextcloud"
+    },
+    {
+      "serverName": "plugin:workstation-mcp:zotero"
+    },
+    {
+      "serverName": "plugin:workstation-mcp:arxiv"
+    },
+    {
+      "serverName": "plugin:workstation-mcp:serena"
+    },
+    {
+      "serverName": "plugin:workstation-research:zotero"
+    },
+    {
+      "serverName": "plugin:workstation-research:arxiv"
+    },
+    {
+      "serverName": "plugin:workstation-dev:serena"
+    },
+    {
+      "serverName": "file-accountant"
+    },
+    {
+      "serverName": "ptsd"
+    },
+    {
+      "serverName": "garmin"
+    },
+    {
+      "serverName": "plugin:cloudflare:cloudflare"
+    },
+    {
+      "serverName": "plugin:workstation-dev:oci"
+    },
+    {
+      "serverName": "plugin:workstation-dev:gcloud"
+    },
+    {
+      "serverName": "plugin:workstation-dev:gcloud-observability"
+    }
   ],
   "disableClaudeAiConnectors": true
 }

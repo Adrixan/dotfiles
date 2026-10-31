@@ -1,6 +1,6 @@
 {
   "name": "workstation-dev",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Development servers: Playwright, git, Serena, OSV, Semgrep (per session); Docker, Lighthouse, accessibility, Excalidraw, draw.io (shared loopback service). Binaries and services come from the ansible ai_workstation role.",
   "author": {
     "name": "Peter Aufner"

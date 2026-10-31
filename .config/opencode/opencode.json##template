@@ -219,6 +219,9 @@
         "oauth": false
       },
       "lighthouse": {"type": "remote", "url": "http://127.0.0.1:8790/servers/lighthouse/mcp", "oauth": false, "disabled": true},
+      "oci": {"type": "remote", "url": "http://127.0.0.1:8790/servers/oci/mcp", "oauth": false},
+      "gcloud": {"type": "remote", "url": "http://127.0.0.1:8790/servers/gcloud/mcp", "oauth": false},
+      "gcloud-observability": {"type": "remote", "url": "http://127.0.0.1:8790/servers/gcloud-observability/mcp", "oauth": false},
       "accessibility": {"type": "remote", "url": "http://127.0.0.1:8790/servers/accessibility/mcp", "oauth": false},
       "docs": {
         "type": "remote",

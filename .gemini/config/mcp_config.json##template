@@ -160,6 +160,9 @@
       "disabled": false
     },
     "lighthouse": {"serverUrl": "http://127.0.0.1:8790/servers/lighthouse/mcp", "disabled": true},
+    "oci": {"serverUrl": "http://127.0.0.1:8790/servers/oci/mcp", "disabled": false},
+    "gcloud": {"serverUrl": "http://127.0.0.1:8790/servers/gcloud/mcp", "disabled": false},
+    "gcloud-observability": {"serverUrl": "http://127.0.0.1:8790/servers/gcloud-observability/mcp", "disabled": false},
     "accessibility": {"serverUrl": "http://127.0.0.1:8790/servers/accessibility/mcp", "disabled": false},
     "docs": {
       "serverUrl": "http://127.0.0.1:6280/mcp",
