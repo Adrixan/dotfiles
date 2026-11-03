@@ -82,8 +82,8 @@ busy-session guards.
   Reise, travel planner → `rc trip <destination>` (the general travel role is not offered); Prof.
   Aufner, content → educator; "research <topic>", deep research on a topic → `rc research "<topic>"`
   (general research chat without a topic → research); Dissertation → phd.
-- Teaching and Deep Research start at boot (Ansible `autostart`) and reattach their previous session
-  when it stopped less than about 4 h earlier; the Greeter offers them only when they are stopped.
+- Teaching and Deep Research start on request like the other roles (no boot start since 2026-11-03,
+  Peter) and reattach their previous session when it stopped less than about 4 h earlier.
 - Stopping a role with sessions: run `rc down <role>` first (it records the request time and starts the
   bounded wait), then find its sessions with `ListAgents` (the names start with the role folder's name)
   and send every one of them with `SendMessage`: "The Greeter is stopping this role: update
