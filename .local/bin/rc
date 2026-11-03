@@ -2,7 +2,8 @@
 # ==============================================================================
 # rc: manage Claude Code remote-control roles (one claude-remote-control@<role> user unit each)
 # Roles: ~/.config/claude-rc/<role>.conf (predefined ones from Ansible ai_workstation, custom ones
-# from `rc new`, folders in ~/Obsidian/Adrixan/AI/Roles). Only the greeter starts at boot.
+# from `rc new`, folders in ~/Obsidian/Adrixan/AI/Roles; project roles from `rc project`, folders in
+# ~/Obsidian/Adrixan/AI/Claude.ai/Projects, the default home of projects). Only the greeter starts at boot.
 # Workspace trust stays a manual step: `cd <folder> && claude` once and accept the dialog.
 # Usage:
 #   rc ls                                   roles with state, sessions, last activity, memory
@@ -33,6 +34,12 @@
 #                                           an existing topic (slug or role) resumes
 #   rc researches                           research topics, most recently active first
 #   rc research --index                     rewrites Research/index.md from the report frontmatter
+#   rc project <Name> [--plugins P] [--description TEXT] [up options]
+#                                           claude.ai-style project ~/Obsidian/Adrixan/AI/Claude.ai/Projects/<Name>
+#                                           (default home of projects, name case-insensitive): starts the role that
+#                                           serves the folder, else creates role project-<slug> (a new folder gets
+#                                           the layout <Name>.md, Wissen, Memory, Artifacts, Chats, .agents)
+#   rc project --list                       project folders with their role, state and last activity
 #   rc menu                                 running roles, stopped roles, trips, research, projects, RAM
 #   rc restore                              starts the roles that ran before a reboot (rc up marks them)
 #   rc hook code-session|greeter-start|research-session|turn-done
@@ -46,6 +53,7 @@ set -euo pipefail
 CONF_DIR="${HOME}/.config/claude-rc"
 ROLES_ROOT="${HOME}/Obsidian/Adrixan/AI/Roles"
 TRIPS_DIR="${HOME}/Obsidian/Adrixan/Travel/Trips"
+PROJECTS_HOME="${HOME}/Obsidian/Adrixan/AI/Claude.ai/Projects"  # default home of projects (Peter, 2026-11-03)
 CODE_DIR="${HOME}/code"
 PROJECTS_DIR="${HOME}/.claude/projects"
 CLAUDE_STATE="${HOME}/.claude.json"
@@ -555,6 +563,107 @@ cmd_trips() {
     done | sort -n | awk -F'\t' 'BEGIN{printf "%-26s %-22s %-9s %s\n","ROLE","LABEL","STATE","LAST_ACT"} {printf "%-26s %-22s %-9s %s\n",$2,$3,$4,($1==""?"-":$1"m")}'
 }
 
+role_of_dir() {  # the role whose RC_DIR is this folder, or empty
+    local f
+    for f in "${CONF_DIR}"/*.conf; do
+        [[ "$(sed -n 's/^RC_DIR="\(.*\)"$/\1/p' "$f")" == "$1" ]] && { basename "$f" .conf; return 0; }
+    done
+    return 0
+}
+
+project_brief() {  # AGENTS.md of a project role ($1 = folder name)
+    cat <<EOF
+Role for the project "$1", a claude.ai-style project in \`~/Obsidian/Adrixan/AI/Claude.ai/Projects/\` (the
+default home of projects; layout and rules: \`~/Obsidian/Adrixan/AI/Roles/projects/AGENTS.md\`).
+
+- At the start of a session read the instruction note \`$1.md\`, \`Wissen/\`, \`Memory/\` and
+  \`.agents/session-handoff.md\`, then follow the note's instructions.
+- Each session is one chat of this project: save it as a dated note in \`Chats/\`, lasting facts in
+  \`Memory/\`, deliverables in \`Artifacts/\`; before the session ends update the note's *Weiterarbeiten*
+  and \`.agents/session-handoff.md\`.
+- Code stays in \`~/code\`, linked in \`Wissen/Code.md\` (path, purpose, \`rc code <repo>\`); development runs
+  in the repo's own role, not here.
+EOF
+}
+
+project_note() {  # instruction note of a new project: $1 name, $2 description
+    local today; today="$(date +%F)"
+    cat <<EOF
+---
+title: "$1"
+type: "claude-project"
+created: "${today}"
+updated: "${today}"
+tags: ["claude-ai", "project"]
+---
+
+# $1
+
+> [!tip] Weiterarbeiten
+> - Angelegt am ${today} mit \`rc project\`. Stand und nächste Schritte: \`.agents/session-handoff.md\`.
+
+## Beschreibung
+
+${2:-*(offen)*}
+
+## Projekt-Anweisungen
+
+*(keine)*
+EOF
+}
+
+project_rows_vault() {  # name, role (or -), state, minutes since last activity; newest first
+    local d role idle state
+    for d in "${PROJECTS_HOME}"/*/; do
+        [[ -d "$d" ]] || continue
+        d="${d%/}"; role="$(role_of_dir "$d")"; idle=""; state="-"
+        if [[ -n "$role" ]]; then
+            idle="$(last_active_min "$role")"
+            state="$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)"
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\n' "${idle:-999999999}" "${d##*/}" "${role:--}" "$state" "${idle:+${idle} min ago}"
+    done | sort -n | cut -f2-
+}
+
+cmd_project() {
+    local name="${1:?project name missing (a folder in ~/Obsidian/Adrixan/AI/Claude.ai/Projects)}" plugins="research" description="" d base dir="" role slug
+    shift
+    if [[ "$name" == --list ]]; then
+        project_rows_vault | awk -F'\t' 'BEGIN{printf "%-28s %-30s %-9s %s\n","PROJECT","ROLE","STATE","LAST_ACT"} {printf "%-28s %-30s %-9s %s\n",$1,$2,$3,($4==""?"-":$4)}'
+        echo "role - : served by the Projects role, or give it its own with: rc project <name>"
+        return 0
+    fi
+    [[ "$name" =~ ^[[:alnum:]][[:alnum:]\ ._-]{0,59}$ ]] || die "project name: letters, digits, spaces, dots, hyphens, underscores; up to 60 characters"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --plugins) plugins="$2"; shift 2 ;;
+            --description) description="$2"; shift 2 ;;
+            *) break ;;  # the rest goes to rc up
+        esac
+    done
+    safe_value "$description"
+    for d in "${PROJECTS_HOME}"/*/; do
+        base="${d%/}"; base="${base##*/}"
+        [[ "${base,,}" == "${name,,}" ]] && { dir="${d%/}"; break; }
+    done
+    if [[ -z "$dir" ]]; then
+        dir="${PROJECTS_HOME}/${name}"
+        mkdir -p "$dir"/{Wissen,Memory,Artifacts,Chats,.agents}
+        project_note "$name" "$description" > "$dir/${name}.md"
+        echo "created project folder $dir"
+    fi
+    role="$(role_of_dir "$dir")"
+    if [[ -z "$role" ]]; then
+        slug="$(slugify "${dir##*/}" | cut -c1-31)"; slug="${slug%-}"
+        [[ -n "$slug" ]] || die "project name needs letters or digits: $name"
+        role="project-${slug}"
+        [[ -e "${CONF_DIR}/${role}.conf" ]] && die "role $role exists for another folder ($(conf_get "$role" RC_DIR))"
+        cmd_new "$role" --label "Project: ${dir##*/}" --dir "$dir" --plugins "$plugins" \
+            --description "Project ${dir##*/}${description:+: ${description}}" --brief "$(project_brief "${dir##*/}")"
+    fi
+    cmd_up "$role" "$@"
+}
+
 report_field() {  # report_field <report.md> <key>: a scalar from the frontmatter, JSON quotes removed
     local v
     v="$(sed -n '1{/^---$/!q};2,/^---$/{s/^'"$2"': *//p}' "$1" 2>/dev/null | head -1)"
@@ -909,7 +1018,7 @@ cmd_menu() {  # one listing for the Greeter's menu
     for f in "${CONF_DIR}"/*.conf; do
         role="$(basename "$f" .conf)"
         # Code starts per project and Travel Planner per trip (Peter, 2026-10-29), so neither is offered here
-        [[ "$role" == greeter || "$role" == code || "$role" == travel || "$role" == code-* || "$role" == trip-* || "$role" == research-* ]] && continue
+        [[ "$role" == greeter || "$role" == code || "$role" == travel || "$role" == code-* || "$role" == trip-* || "$role" == research-* || "$role" == project-* ]] && continue
         systemctl --user is-active --quiet "$(unit "$role")" && continue
         idle="$(last_active_min "$role")"
         printf '%s\t  %s | %s | %s\n' "${idle:-999999999}" "$(conf_get "$role" RC_NAME)" "$role" "${idle:+${idle} min ago}"
@@ -932,6 +1041,8 @@ cmd_menu() {  # one listing for the Greeter's menu
             "$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)" "${idle:+${idle} min ago}" \
             "$(report_field "$(research_report "$slug")" status)"
     done | sort -n | head -5 | cut -f2-
+    echo "VAULT PROJECTS in ~/Obsidian/Adrixan/AI/Claude.ai/Projects, most recent first (name | role, - = Projects role | state | last activity); start with rc project <name>:"
+    project_rows_vault | awk -F'\t' '{printf "  %s | %s | %s | %s\n",$1,$2,$3,$4}'
     echo "RECENT PROJECTS in ~/code (name | last used | note):"
     project_rows | head -6 | awk -F'\t' -v now="$(date +%s)" '{printf "  %s | %d d ago | %s\n",$2,(now-$1)/86400,$4}'
     echo "RAM available: $(available_mb) MB"
@@ -967,6 +1078,7 @@ case "${1:-ls}" in
     logs) shift; cmd_logs "$@" ;;
     trip) shift; cmd_trip "$@" ;;
     trips) cmd_trips ;;
+    project) shift; cmd_project "$@" ;;
     projects) cmd_projects ;;
     code) shift; cmd_code "$@" ;;
     research) shift; cmd_research "$@" ;;
