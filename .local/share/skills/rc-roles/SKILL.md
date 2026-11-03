@@ -35,12 +35,22 @@ busy-session guards.
   for a session Peter tells directly to stop. The signalling turn sends no push.
 - `rc new <name> --label "…" --plugins dev,research,travel --brief "…" [--description "…"] [--args "--spawn worktree"]`:
   creates `~/Obsidian/Adrixan/AI/Roles/<name>` with `AGENTS.md` (the brief) and plugin settings. The core
-  plugin (GitHub, memory, fetch, Nextcloud, mail, docs) is always on.
+  plugin (GitHub, memory, fetch, Nextcloud, mail, docs) is always on. Not for projects: those use
+  `rc project`.
 - `rc rm <name>` stops and removes a custom role (the folder stays); `rc logs <role> [lines]`.
 - Trips, several in parallel: `rc trip <destination> [up options]` creates the role `trip-<slug>` on first
   use (folder `~/Obsidian/Adrixan/Travel/Trips/<slug>` with the trip brief, travel and research plugins)
   and starts or resumes it later; `rc trips` lists them. Each trip keeps `trip.md` and its handoff in its
   folder, so it can be restored after any pause.
+- Vault projects (claude.ai-style: instruction note, `Wissen/`, `Memory/`, `Artifacts/`, `Chats/`,
+  `.agents/`), whose default home since 2026-11-03 is `~/Obsidian/Adrixan/AI/Claude.ai/Projects/` (Peter;
+  layout and rules in `~/Obsidian/Adrixan/AI/Roles/projects/AGENTS.md`): `rc project <Name> [--plugins P]
+  [--description "…"] [up options]` starts the role that serves `Projects/<Name>` (name case-insensitive,
+  e.g. `educator` for Prof. Aufner), else creates the role `project-<slug>` (label "Project: <Name>",
+  research plugin unless `--plugins` says otherwise); an unknown name creates the folder with that layout
+  first. The folder inherits the trust of `Projects/` (accepted 2026-11-03). `rc project --list` lists the
+  folders with role (`-` = no own role yet; the Projects role serves those) and last activity. Code stays
+  in `~/code`, linked from the project's `Wissen/Code.md`.
 - Code projects, any number in parallel: `rc code <project>` creates and starts the role `code-<project>`
   (session "Code: <project>"), served from the helper folder `~/code/.rc/<project>`. Only one server
   per folder is possible and a repository in `~/code` is untrusted on its own, but the helper folder is
@@ -65,7 +75,7 @@ busy-session guards.
   status; `rc research --index` rewrites `Research/index.md`. Results always land in the vault (rules in
   `Research/AGENTS.md`).
 - `rc menu`: running roles (with pending stops), stopped fixed and custom roles, trips, research topics,
-  recent projects and free RAM in one
+  vault projects, recent code projects and free RAM in one
   listing (the Greeter's menu).
 - Roles return after a reboot: `rc up` marks a role as wanted, `rc down`, `rc rm` and an expired `--ttl`
   unmark it (state in `~/.local/state/claude-rc/wanted/`). The Greeter's SessionStart hook
@@ -81,7 +91,8 @@ busy-session guards.
   code projects come and go): teacher, Lehrer → teaching; coding, dev → `rc code <project>`; trip,
   Reise, travel planner → `rc trip <destination>` (the general travel role is not offered); Prof.
   Aufner, content → educator; "research <topic>", deep research on a topic → `rc research "<topic>"`
-  (general research chat without a topic → research); Dissertation → phd.
+  (general research chat without a topic → research); Dissertation → phd; "Projekt <Name>" or any name
+  under VAULT PROJECTS in `rc menu` → `rc project <Name>`.
 - Teaching and Deep Research start on request like the other roles (no boot start since 2026-11-03,
   Peter) and reattach their previous session when it stopped less than about 4 h earlier.
 - Stopping a role with sessions: run `rc down <role>` first (it records the request time and starts the
