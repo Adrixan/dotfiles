@@ -4,3 +4,5 @@
 .ssh/id_ed25519_vps
 .config/rclone/rclone.conf
 .config/ai/env.local
+.research_stack.env
+.config/edu-publish/config.toml
