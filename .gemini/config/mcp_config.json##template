@@ -169,21 +169,13 @@
       "disabled": false
     },
     "nasa": {"serverUrl": "http://127.0.0.1:8790/servers/nasa/mcp", "disabled": true},
-    "open-meteo": {"serverUrl": "http://127.0.0.1:8790/servers/open-meteo/mcp", "disabled": true},
     "wikipedia": {"serverUrl": "http://127.0.0.1:8790/servers/wikipedia/mcp", "disabled": true},
     "duckduckgo": {"serverUrl": "http://127.0.0.1:8790/servers/duckduckgo/mcp", "disabled": false},
     "ris-austria": {"serverUrl": "http://127.0.0.1:8790/servers/ris-austria/mcp", "disabled": false},
     "eur-lex": {"serverUrl": "http://127.0.0.1:8790/servers/eur-lex/mcp", "disabled": false},
     "youtube-transcript": {"serverUrl": "http://127.0.0.1:8790/servers/youtube-transcript/mcp", "disabled": false},
-    "oebb": {"serverUrl": "http://127.0.0.1:8790/servers/oebb/mcp", "disabled": true},
     "thunderbird": {"serverUrl": "http://127.0.0.1:8790/servers/thunderbird/mcp", "disabled": false},
-    "garmin": {"serverUrl": "http://127.0.0.1:8790/servers/garmin/mcp", "disabledTools": ["upload_course"], "disabled": false},
-    "trip-scout": {"serverUrl": "http://127.0.0.1:8790/servers/trip-scout/mcp", "disabled": false},
-    "trip-planner": {"serverUrl": "http://127.0.0.1:8790/servers/trip-planner/mcp", "disabled": false}
-{% endif %}
-{% if env.OPENROUTESERVICE_API_KEY != "" %}
-    ,
-    "openroute": {"serverUrl": "http://127.0.0.1:8790/servers/openroute/mcp", "disabled": false}
+    "garmin": {"serverUrl": "http://127.0.0.1:8790/servers/garmin/mcp", "disabledTools": ["upload_course"], "disabled": false}
 {% endif %}
   }
 }

@@ -19,11 +19,6 @@
       "name": "workstation-research",
       "source": "./plugins/workstation-research",
       "description": "Research and law MCP servers (arXiv, Zotero, OpenAlex, Phở, Obsidian search, Wikipedia, YouTube, RIS, EUR-Lex, NASA)"
-    },
-    {
-      "name": "workstation-travel",
-      "source": "./plugins/workstation-travel",
-      "description": "Travel MCP servers (Open-Meteo, OpenRouteService, ÖBB, trip-scout, trip-planner)"
     }
   ]
 }
