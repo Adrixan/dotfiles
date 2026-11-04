@@ -1,6 +1,6 @@
 ---
 name: rc-roles
-description: Start, stop, list and create Claude Code remote-control roles on schulpc (code, teaching, educator, research, phd, travel, greeter, one role per trip, one role per code project, and custom roles) with the `rc` command. Use when Peter greets the Greeter session, asks which roles are running, wants a role started or stopped ("start teacher for 3 hours", "stop everything idle", "fresh code session"), wants to plan a trip or resume one ("plan Berlin", "back to Prague"), wants to work on or create a code project, wants a deep research on a topic ("research <topic>") or to resume one, or wants a new custom role.
+description: Start, stop, list and create Claude Code remote-control roles on schulpc (code, teaching, educator, research, phd, greeter, one role per trip, one role per code project, and custom roles) with the `rc` command. Use when Peter greets the Greeter session, asks which roles are running, wants a role started or stopped ("start teacher for 3 hours", "stop everything idle", "fresh code session"), wants to plan a trip or resume one ("plan Berlin", "back to Prague"), wants to work on or create a code project, wants a deep research on a topic ("research <topic>") or to resume one, or wants a new custom role.
 ---
 
 # rc-roles
@@ -33,13 +33,13 @@ busy-session guards.
   records the signal for this session; with a stop pending, the role stops seconds after the turn ends.
   Without a pending stop it changes nothing, unless `--stop` is given, which requests the stop itself:
   for a session Peter tells directly to stop. The signalling turn sends no push.
-- `rc new <name> --label "…" --plugins dev,research,travel --brief "…" [--description "…"] [--args "--spawn worktree"]`:
+- `rc new <name> --label "…" --plugins dev,research --brief "…" [--description "…"] [--args "--spawn worktree"]`:
   creates `~/Obsidian/Adrixan/AI/Roles/<name>` with `AGENTS.md` (the brief) and plugin settings. The core
   plugin (GitHub, memory, fetch, Nextcloud, mail, docs) is always on. Not for projects: those use
   `rc project`.
 - `rc rm <name>` stops and removes a custom role (the folder stays); `rc logs <role> [lines]`.
 - Trips, several in parallel: `rc trip <destination> [up options]` creates the role `trip-<slug>` on first
-  use (folder `~/Obsidian/Adrixan/Travel/Trips/<slug>` with the trip brief, travel and research plugins)
+  use (folder `~/Obsidian/Adrixan/Travel/Trips/<slug>` with the trip brief and the research plugin)
   and starts or resumes it later; `rc trips` lists them. Each trip keeps `trip.md` and its handoff in its
   folder, so it can be restored after any pause. Since 2026-11-04 trip roles run on the agentbox
   (`RC_TRIP_HOST=agentbox` in schulpc's `~/.config/claude-rc/rc.env`): `rc trip`, `rc trips` and
@@ -107,7 +107,7 @@ busy-session guards.
   handoff may be missing. Peter saying "stop now" or "force" means `--now`.
 - The RAM guard of `rc up` stays: never add `--force` to `rc up` on your own; report the refusal and ask.
 - Before `rc new`, settle in one question: name, label, plugins (suggest based on the purpose: code →
-  dev; literature, law → research; trips → travel) and a two to four sentence brief that becomes the
+  dev; literature, law → research; trips never get a custom role, they use `rc trip`) and a two to four sentence brief that becomes the
   role's `AGENTS.md`. Custom-role briefs must not contain secrets or personal data of students or family.
 - After `rc up`, tell Peter the session label to open in the Claude app; it appears within about 30 s.
   A role stopped less than about 2 minutes ago starts with a delay (the unit retries).
