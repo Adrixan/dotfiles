@@ -6,3 +6,4 @@
 .config/ai/env.local
 .research_stack.env
 .config/edu-publish/config.toml
+code/helbling-media-downloader/.env.local
