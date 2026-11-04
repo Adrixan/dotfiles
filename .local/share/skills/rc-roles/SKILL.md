@@ -41,7 +41,10 @@ busy-session guards.
 - Trips, several in parallel: `rc trip <destination> [up options]` creates the role `trip-<slug>` on first
   use (folder `~/Obsidian/Adrixan/Travel/Trips/<slug>` with the trip brief, travel and research plugins)
   and starts or resumes it later; `rc trips` lists them. Each trip keeps `trip.md` and its handoff in its
-  folder, so it can be restored after any pause.
+  folder, so it can be restored after any pause. Since 2026-11-04 trip roles run on the agentbox
+  (`RC_TRIP_HOST=agentbox` in schulpc's `~/.config/claude-rc/rc.env`): `rc trip`, `rc trips` and
+  `rc up|down|restart|logs|rm trip-*` forward there over SSH, the same commands work as before, and the
+  folder syncs back through Syncthing. Never start a trip role on schulpc while it runs there.
 - Vault projects (claude.ai-style: instruction note, `Wissen/`, `Memory/`, `Artifacts/`, `Chats/`,
   `.agents/`), whose default home since 2026-11-03 is `~/Obsidian/Adrixan/AI/Claude.ai/Projects/` (Peter;
   layout and rules in `~/Obsidian/Adrixan/AI/Roles/projects/AGENTS.md`): `rc project <Name> [--plugins P]
