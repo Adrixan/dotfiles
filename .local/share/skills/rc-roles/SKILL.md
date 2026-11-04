@@ -38,6 +38,10 @@ busy-session guards.
   plugin (GitHub, memory, fetch, Nextcloud, mail, docs) is always on. Not for projects: those use
   `rc project`.
 - `rc rm <name>` stops and removes a custom role (the folder stays); `rc logs <role> [lines]`.
+- Two workstations (schulpc primary, xps13 standby, 2026-11-04): custom role confs travel through the
+  Syncthing folder `~/sync/ai/claude-rc` (every rc command exchanges them first; `rc sync-confs` does it
+  now), `rc rm` removes a role on both. `RC_SHARED_EXCLUDE` in a machine's `rc.env` keeps roles local
+  (`code-ptsd` on schulpc). Run a role on one machine at a time: check `rc ls` on the other before `rc up`.
 - Trips, several in parallel: `rc trip <destination> [up options]` creates the role `trip-<slug>` on first
   use (folder `~/Obsidian/Adrixan/Travel/Trips/<slug>` with the trip brief and the research plugin)
   and starts or resumes it later; `rc trips` lists them. Each trip keeps `trip.md` and its handoff in its
