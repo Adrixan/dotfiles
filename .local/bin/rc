@@ -14,7 +14,7 @@
 #   rc handoff-done [--stop] [--file F]     run by a role's session after writing its handoff: the role stops
 #                                           seconds after the turn ends (--stop: request that stop itself)
 #   rc restart <role>
-#   rc new <name> [--label L] [--dir D] [--plugins dev,research,travel] [--brief TEXT]
+#   rc new <name> [--label L] [--dir D] [--plugins dev,research] [--brief TEXT]
 #          [--description TEXT] [--args "--spawn worktree"]
 #   rc rm <name> [--force]                  custom roles only; keeps the folder
 #   rc logs <role> [lines]
@@ -72,7 +72,7 @@ STOP_TURN_MARGIN=30 # in_turn: the transcript may change this long after a turn 
 STOP_QUIET_SEC=60   # rc down: the session must have been quiet this long after its handoff
 NOTIFY_MIN_SEC=60   # turn-done hook: only turns at least this long end with a push
 CUSTOM_MARKER="# Created by rc new"
-OPTIONAL_PLUGINS=(dev research travel)
+OPTIONAL_PLUGINS=(dev research)  # travel retired 2026-11-04: trips run on the agentbox with their own MCP setup
 # One server per folder (a second `claude remote-control` in a folder is refused) and a repository in
 # ~/code is untrusted on its own, so each project runs in a helper folder ~/code/.rc/<project>: not a
 # git repository, so it inherits the ~/code trust; auto mode edits the project outside that folder
@@ -508,7 +508,7 @@ cmd_new() {
     label="${label:-${name^}}"; dir="${dir:-${ROLES_ROOT}/${name}}"; description="${description:-${brief%%.*}}"
     for p in "$label" "$dir" "$description" "$args"; do safe_value "$p"; done
     for p in ${plugins//,/ }; do
-        [[ " ${OPTIONAL_PLUGINS[*]} " == *" $p "* ]] || die "unknown plugin '$p' (dev, research, travel)"
+        [[ " ${OPTIONAL_PLUGINS[*]} " == *" $p "* ]] || die "unknown plugin '$p' (dev, research)"
     done
     dir="$(realpath -m -- "$dir")"
     if [[ "$files" == yes ]]; then
@@ -565,7 +565,7 @@ cmd_trip() {
     [[ -n "$slug" ]] || die "destination needs letters or digits: $dest"
     role="trip-${slug}"
     if [[ ! -e "${CONF_DIR}/${role}.conf" ]]; then
-        cmd_new "$role" --label "Trip ${dest}" --dir "${TRIPS_DIR}/${slug}" --plugins travel,research \
+        cmd_new "$role" --label "Trip ${dest}" --dir "${TRIPS_DIR}/${slug}" --plugins research \
             --description "Trip planning: ${dest}" --brief "$(trip_brief "$dest")"
     fi
     cmd_up "$role" "$@"
