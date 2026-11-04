@@ -63,6 +63,9 @@ MIN_AVAILABLE_MB=1024
 #   RC_MIN_AVAILABLE_MB=<n>   RAM guard of rc up (the 1 GB agentbox uses a lower one)
 #   RC_TRIP_HOST=<ssh host>   trip roles run there (as RC_TRIP_USER, default travel); this machine forwards
 #                             rc trip, rc trips and rc up|down|restart|logs trip-* (Peter, 2026-11-04)
+#   RC_REMOTE_ROLES="<role>=<user>@<ssh host> ..."  these roles run on another host as that user; this
+#                             machine forwards rc up|down|restart|logs, lists them and never starts or
+#                             restores them (educator on edu-micro, Peter 2026-11-04)
 # shellcheck source=/dev/null
 [[ -r "${CONF_DIR}/rc.env" ]] && . "${CONF_DIR}/rc.env"
 MIN_AVAILABLE_MB="${RC_MIN_AVAILABLE_MB:-$MIN_AVAILABLE_MB}"
@@ -108,6 +111,22 @@ remote_rc() {  # remote_rc <rc args...>: run rc as RC_TRIP_USER on RC_TRIP_HOST 
     args="$(printf '%q ' "$@")"
     ssh -o BatchMode=yes -o ConnectTimeout=20 "$RC_TRIP_HOST" \
         "sudo -iu $user env XDG_RUNTIME_DIR=/run/user/\$(id -u $user) /home/$user/.local/bin/rc $args"
+}
+
+remote_role_target() {  # remote_role_target <role>: prints <user>@<host> when the role runs elsewhere
+    local pair
+    for pair in ${RC_REMOTE_ROLES:-}; do
+        [[ "${pair%%=*}" == "$1" ]] || continue
+        [[ "${pair#*=}" =~ ^[a-z_][a-z0-9_-]*@[A-Za-z0-9.-]+$ ]] || die "RC_REMOTE_ROLES: invalid target in '$pair'"
+        echo "${pair#*=}"; return 0
+    done
+    return 1
+}
+
+remote_role_rc() {  # remote_role_rc <target> <rc args...>: run that user's own rc there (its user units)
+    local target="$1" args; shift
+    args="$(printf '%q ' "$@")"
+    ssh -o BatchMode=yes -o ConnectTimeout=20 "$target" "XDG_RUNTIME_DIR=/run/user/\$(id -u) \$HOME/.local/bin/rc $args"
 }
 
 usage() {
@@ -877,6 +896,7 @@ cmd_restore() {  # start the roles that ran before a reboot; prints one summary 
         role="$(basename "$f")"
         [[ "$role" != greeter && -f "${CONF_DIR}/${role}.conf" ]] || { rm -f -- "$f"; continue; }
         [[ "$role" == trip-* ]] && remote_trips && { rm -f -- "$f"; continue; }  # runs on RC_TRIP_HOST
+        remote_role_target "$role" >/dev/null && { rm -f -- "$f"; continue; }  # runs on its own host
         systemctl --user is-active --quiet "$(unit "$role")" && continue
         if out="$( (cmd_up "$role") 2>&1 )"; then
             ok+=("$(conf_get "$role" RC_NAME)")
@@ -1023,7 +1043,7 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
 }
 
 cmd_menu() {  # one listing for the Greeter's menu
-    local f role idle stop slug
+    local f role idle stop slug pair state
     echo "RUNNING (label | role | sessions | last activity | MB | pending stop):"
     for f in "${CONF_DIR}"/*.conf; do
         role="$(basename "$f" .conf)"
@@ -1038,10 +1058,21 @@ cmd_menu() {  # one listing for the Greeter's menu
         role="$(basename "$f" .conf)"
         # Code starts per project and Travel Planner per trip (Peter, 2026-10-29), so neither is offered here
         [[ "$role" == greeter || "$role" == code || "$role" == travel || "$role" == code-* || "$role" == trip-* || "$role" == research-* || "$role" == project-* ]] && continue
+        remote_role_target "$role" >/dev/null && continue  # listed under REMOTE ROLES
         systemctl --user is-active --quiet "$(unit "$role")" && continue
         idle="$(last_active_min "$role")"
         printf '%s\t  %s | %s | %s\n' "${idle:-999999999}" "$(conf_get "$role" RC_NAME)" "$role" "${idle:+${idle} min ago}"
     done | sort -n | cut -f2-
+    if [[ -n "${RC_REMOTE_ROLES:-}" ]]; then
+        echo "REMOTE ROLES (label | role | host | state; rc up|down|restart|logs work from here):"
+        for pair in ${RC_REMOTE_ROLES}; do
+            role="${pair%%=*}"
+            state="$(ssh -o BatchMode=yes -o ConnectTimeout=20 "${pair#*=}" \
+                "XDG_RUNTIME_DIR=/run/user/\$(id -u) systemctl --user is-active $(printf '%q' "$(unit "$role")")" 2>/dev/null || true)"
+            printf '  %s | %s | %s | %s\n' "$( [[ -f "${CONF_DIR}/${role}.conf" ]] && conf_get "$role" RC_NAME || echo "$role")" \
+                "$role" "${pair#*=}" "${state:-not reachable}"
+        done
+    fi
     if remote_trips; then  # trip roles run on the agentbox; list them from there
         echo "TRIPS on ${RC_TRIP_HOST} (rc trip|up|down work from here):"
         remote_rc trips 2>/dev/null | sed 's/^/  /' || echo "  (${RC_TRIP_HOST} not reachable)"
@@ -1096,6 +1127,19 @@ if remote_trips; then  # trip roles run on RC_TRIP_HOST: forward, never start th
     case "${1:-}" in
         trip|trips) remote_rc "$@"; exit $? ;;
         up|start|down|stop|restart|logs|rm|remove) [[ "${2:-}" == trip-* ]] && { remote_rc "$@"; exit $?; } ;;
+    esac
+fi
+if [[ -n "${RC_REMOTE_ROLES:-}" && -n "${2:-}" ]]; then  # roles that live on another host: forward
+    case "$1" in
+        up|start|down|stop|restart|logs)
+            r="$(resolve "$2" 2>/dev/null || echo "$2")"
+            if target="$(remote_role_target "$r")"; then
+                if systemctl --user is-active --quiet "$(unit "$r")"; then  # a stray local copy: only stop or read it here
+                    [[ "$1" == up || "$1" == start || "$1" == restart ]] && die "$r also runs here: rc down $r stops this copy first (it belongs on $target)"
+                else
+                    remote_role_rc "$target" "$1" "$r" "${@:3}"; exit $?
+                fi
+            fi ;;
     esac
 fi
 case "${1:-ls}" in
