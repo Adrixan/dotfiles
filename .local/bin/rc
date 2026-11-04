@@ -529,9 +529,9 @@ trip_brief() {  # AGENTS.md of a new trip role
 Trip planning role for $1, one of several trips planned in parallel (each trip has its own folder in
 \`~/Obsidian/Adrixan/Travel/Trips/\` and its own role \`trip-<slug>\`).
 
-- Follow the travel standing order: first read the memory entities \`Travel planning\`, \`Packing lists\`,
-  \`Travel history\`, \`Peter Aufner\`, \`Julia\`, \`Solveig\` and \`Elenore\`, and the Travel section of
-  \`~/sync/ai/WORKSTATION-details.md\`.
+- Follow the travel standing order in \`../../AGENTS.md\` (loaded as the parent \`CLAUDE.md\`): first read
+  the memory entities \`Travel planning\`, \`Packing lists\`, \`Travel history\`, \`Peter Aufner\`, \`Julia\`,
+  \`Solveig\` and \`Elenore\`.
 - Keep this trip's state in this folder so a later session can restore it: \`trip.md\` (dates,
   travellers, decisions, open questions, trip-planner slug) and \`.agents/session-handoff.md\`, both
   updated after every planning step.
