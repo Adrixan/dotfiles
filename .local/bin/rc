@@ -21,6 +21,7 @@
 #   rc trip <destination> [up options]      role trip-<slug> in ~/Obsidian/Adrixan/Travel/Trips/<slug>
 #                                           (created on first use, resumed later)
 #   rc trips                                trip roles, most recently active first
+#                                           (with RC_TRIP_HOST in rc.env these and rc up/down/restart/logs/rm trip-* forward there)
 #   rc projects                             folders in ~/code, most recently used first
 #   rc code <project> [up options]          role code-<project>, served from the helper folder
 #                                           ~/code/.rc/<project> (inherits the ~/code trust), any
@@ -58,6 +59,13 @@ CODE_DIR="${HOME}/code"
 PROJECTS_DIR="${HOME}/.claude/projects"
 CLAUDE_STATE="${HOME}/.claude.json"
 MIN_AVAILABLE_MB=1024
+# Optional per-machine settings, not in yadm (~/.config/claude-rc/rc.env):
+#   RC_MIN_AVAILABLE_MB=<n>   RAM guard of rc up (the 1 GB agentbox uses a lower one)
+#   RC_TRIP_HOST=<ssh host>   trip roles run there (as RC_TRIP_USER, default travel); this machine forwards
+#                             rc trip, rc trips and rc up|down|restart|logs trip-* (Peter, 2026-11-04)
+# shellcheck source=/dev/null
+[[ -r "${CONF_DIR}/rc.env" ]] && . "${CONF_DIR}/rc.env"
+MIN_AVAILABLE_MB="${RC_MIN_AVAILABLE_MB:-$MIN_AVAILABLE_MB}"
 STOP_WAIT_MIN=10    # rc down: wait for the handoff, then stop unless a session is still in a turn
 STOP_HARD_FACTOR=2  # rc down: that wait times this is the hard limit, also for a session in a turn
 STOP_TURN_MARGIN=30 # in_turn: the transcript may change this long after a turn end (seconds)
@@ -91,6 +99,16 @@ RESUME_HOURS=4
 
 die() { echo "rc: $*" >&2; exit 1; }
 unit() { echo "claude-remote-control@$1.service"; }
+
+remote_trips() { [[ -n "${RC_TRIP_HOST:-}" ]]; }  # trip roles live on RC_TRIP_HOST
+
+remote_rc() {  # remote_rc <rc args...>: run rc as RC_TRIP_USER on RC_TRIP_HOST (its user units need XDG_RUNTIME_DIR)
+    local user="${RC_TRIP_USER:-travel}" args
+    [[ "$user" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "RC_TRIP_USER: invalid user name"
+    args="$(printf '%q ' "$@")"
+    ssh -o BatchMode=yes -o ConnectTimeout=20 "$RC_TRIP_HOST" \
+        "sudo -iu $user env XDG_RUNTIME_DIR=/run/user/\$(id -u $user) /home/$user/.local/bin/rc $args"
+}
 
 usage() {
     sed -n '/^# Usage:/,/^# <role>/p' "$0" | sed 's/^# \{0,1\}//' >&2
@@ -858,6 +876,7 @@ cmd_restore() {  # start the roles that ran before a reboot; prints one summary 
         [[ -e "$f" ]] || continue
         role="$(basename "$f")"
         [[ "$role" != greeter && -f "${CONF_DIR}/${role}.conf" ]] || { rm -f -- "$f"; continue; }
+        [[ "$role" == trip-* ]] && remote_trips && { rm -f -- "$f"; continue; }  # runs on RC_TRIP_HOST
         systemctl --user is-active --quiet "$(unit "$role")" && continue
         if out="$( (cmd_up "$role") 2>&1 )"; then
             ok+=("$(conf_get "$role" RC_NAME)")
@@ -1023,8 +1042,13 @@ cmd_menu() {  # one listing for the Greeter's menu
         idle="$(last_active_min "$role")"
         printf '%s\t  %s | %s | %s\n' "${idle:-999999999}" "$(conf_get "$role" RC_NAME)" "$role" "${idle:+${idle} min ago}"
     done | sort -n | cut -f2-
+    if remote_trips; then  # trip roles run on the agentbox; list them from there
+        echo "TRIPS on ${RC_TRIP_HOST} (rc trip|up|down work from here):"
+        remote_rc trips 2>/dev/null | sed 's/^/  /' || echo "  (${RC_TRIP_HOST} not reachable)"
+    else
     echo "TRIPS, most recent first (label | role | state | last activity):"
-    for f in "${CONF_DIR}"/trip-*.conf; do
+    fi
+    remote_trips || for f in "${CONF_DIR}"/trip-*.conf; do
         [[ -e "$f" ]] || continue
         role="$(basename "$f" .conf)"
         idle="$(last_active_min "$role")"
@@ -1068,6 +1092,12 @@ cmd_logs() {
 
 [[ "${1:-}" == hook ]] && { shift; cmd_hook "$@"; exit 0; }  # also runs on machines without roles
 [[ -d "$CONF_DIR" ]] || die "no role configs in $CONF_DIR"
+if remote_trips; then  # trip roles run on RC_TRIP_HOST: forward, never start them here
+    case "${1:-}" in
+        trip|trips) remote_rc "$@"; exit $? ;;
+        up|start|down|stop|restart|logs|rm|remove) [[ "${2:-}" == trip-* ]] && { remote_rc "$@"; exit $?; } ;;
+    esac
+fi
 case "${1:-ls}" in
     ls|list|status) cmd_ls ;;
     up|start) shift; cmd_up "$@" ;;
