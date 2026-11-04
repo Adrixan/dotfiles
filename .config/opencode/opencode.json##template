@@ -229,19 +229,12 @@
         "oauth": false
       },
       "nasa": {"type": "remote", "url": "http://127.0.0.1:8790/servers/nasa/mcp", "oauth": false, "disabled": true},
-      "open-meteo": {"type": "remote", "url": "http://127.0.0.1:8790/servers/open-meteo/mcp", "oauth": false, "disabled": true},
       "wikipedia": {"type": "remote", "url": "http://127.0.0.1:8790/servers/wikipedia/mcp", "oauth": false, "disabled": true},
       "duckduckgo": {"type": "remote", "url": "http://127.0.0.1:8790/servers/duckduckgo/mcp", "oauth": false},
       "ris-austria": {"type": "remote", "url": "http://127.0.0.1:8790/servers/ris-austria/mcp", "oauth": false},
       "eur-lex": {"type": "remote", "url": "http://127.0.0.1:8790/servers/eur-lex/mcp", "oauth": false},
       "youtube-transcript": {"type": "remote", "url": "http://127.0.0.1:8790/servers/youtube-transcript/mcp", "oauth": false},
-      "oebb": {"type": "remote", "url": "http://127.0.0.1:8790/servers/oebb/mcp", "oauth": false, "disabled": true},
       "thunderbird": {"type": "remote", "url": "http://127.0.0.1:8790/servers/thunderbird/mcp", "oauth": false},
-      "trip-scout": {"type": "remote", "url": "http://127.0.0.1:8790/servers/trip-scout/mcp", "oauth": false},
-      "trip-planner": {"type": "remote", "url": "http://127.0.0.1:8790/servers/trip-planner/mcp", "oauth": false},
-{% endif %}
-{% if env.OPENROUTESERVICE_API_KEY != "" %}
-      "openroute": {"type": "remote", "url": "http://127.0.0.1:8790/servers/openroute/mcp", "oauth": false},
 {% endif %}
       "newspaper-testground": {
         "type": "local",
