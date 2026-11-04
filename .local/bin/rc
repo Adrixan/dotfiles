@@ -43,6 +43,8 @@
 #   rc project --list                       project folders with their role, state and last activity
 #   rc menu                                 running roles, stopped roles, trips, research, projects, RAM
 #   rc restore                              starts the roles that ran before a reboot (rc up marks them)
+#   rc sync-confs                           exchanges custom role confs with the other workstation now
+#                                           (every rc command does it first; ~/sync/ai/claude-rc)
 #   rc hook code-session|greeter-start|research-session|turn-done
 #                                           SessionStart hooks of ~/code, the Greeter and research topics;
 #                                           Stop hook (global) that asks for a push after long turns
@@ -81,6 +83,11 @@ OPTIONAL_PLUGINS=(dev research)  # travel retired 2026-11-04: trips run on the a
 # git repository, so it inherits the ~/code trust; auto mode edits the project outside that folder
 SLOTS_DIR="${CODE_DIR}/.rc"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-rc"
+# Custom role confs (marked with CUSTOM_MARKER) travel between the workstations through this Syncthing
+# folder, so a role made on one machine can start on the other (rc sync-confs; RC_SHARED_CONF_DIR= in
+# rc.env turns it off; RC_SHARED_EXCLUDE="<role> ..." keeps roles on this machine). Predefined roles come
+# from Ansible on each machine, rc.env stays per machine.
+SHARED_CONF_DIR="${RC_SHARED_CONF_DIR-${HOME}/sync/ai/claude-rc}"
 FOCUS_SESSIONS="${STATE_DIR}/code-focus-sessions"
 FOCUS_LOG="${STATE_DIR}/code-focus.log"
 FOCUS_REMOTE="${STATE_DIR}/code-focus-remote"  # cse_<id> of a session -> project
@@ -1103,6 +1110,54 @@ cmd_menu() {  # one listing for the Greeter's menu
     echo "RAM available: $(available_mb) MB"
 }
 
+sync_confs() {  # sync_confs [-v]: exchange custom role confs with SHARED_CONF_DIR (newer copy wins)
+    local verbose="${1:-}" f s t role
+    [[ -n "$SHARED_CONF_DIR" && -d "$(dirname "$SHARED_CONF_DIR")" ]] || return 0
+    mkdir -p "$SHARED_CONF_DIR"
+    shared_skip() {  # roles that never travel: forwarded ones, and RC_SHARED_EXCLUDE (rc.env) of this machine
+        [[ " ${RC_SHARED_EXCLUDE:-} " == *" $1 "* ]] && return 0
+        [[ "$1" == trip-* ]] && remote_trips && return 0
+        remote_role_target "$1" >/dev/null
+    }
+    # rc rm on another machine: drop the local copy unless it is running here
+    for t in "$SHARED_CONF_DIR"/*.removed; do
+        [[ -e "$t" ]] || continue
+        role="$(basename "$t" .removed)"; f="${CONF_DIR}/${role}.conf"
+        if [[ -f "$f" && "$f" -nt "$t" ]]; then rm -f -- "$t"; continue; fi  # created again after the rm
+        [[ -f "$f" ]] && grep -qxF "$CUSTOM_MARKER" "$f" || continue
+        if systemctl --user is-active --quiet "$(unit "$role")"; then
+            echo "rc: $role was removed on another machine but runs here; rc rm $role when done" >&2; continue
+        fi
+        rm -f -- "$f"; unwant "$role"; [[ -n "$verbose" ]] && echo "removed $role (rc rm on another machine)"
+    done
+    find "$SHARED_CONF_DIR" -maxdepth 1 -name '*.removed' -mtime +30 -delete 2>/dev/null
+    for f in "${CONF_DIR}"/*.conf; do  # export
+        [[ -e "$f" ]] && grep -qxF "$CUSTOM_MARKER" "$f" || continue
+        role="$(basename "$f" .conf)"; shared_skip "$role" && continue
+        s="${SHARED_CONF_DIR}/${role}.conf"
+        [[ -e "${SHARED_CONF_DIR}/${role}.removed" ]] && continue
+        if [[ ! -e "$s" ]] || { [[ "$f" -nt "$s" ]] && ! cmp -s "$f" "$s"; }; then
+            cp -p -- "$f" "$s"; [[ -n "$verbose" ]] && echo "shared $role"
+        fi
+    done
+    for s in "$SHARED_CONF_DIR"/*.conf; do  # import
+        [[ -e "$s" ]] && grep -qxF "$CUSTOM_MARKER" "$s" || continue
+        role="$(basename "$s" .conf)"; shared_skip "$role" && continue
+        f="${CONF_DIR}/${role}.conf"
+        if [[ -e "$f" ]]; then
+            grep -qxF "$CUSTOM_MARKER" "$f" || continue  # a predefined role of this machine wins
+            [[ "$s" -nt "$f" ]] && ! cmp -s "$s" "$f" || continue
+            systemctl --user is-active --quiet "$(unit "$role")" && continue  # applies after its next stop
+        fi
+        cp -p -- "$s" "$f"; [[ -n "$verbose" ]] && echo "imported $role"
+        t="$(sed -n 's/^RC_DIR="\(.*\)"$/\1/p' "$f")"
+        [[ "$t" == "$SLOTS_DIR"/* && ! -d "$t" ]] && make_slot "$t"
+    done
+    return 0
+}
+
+cmd_sync_confs() { sync_confs -v; }
+
 cmd_rm() {
     local role
     role="$(resolve "${1:?role missing}")"
@@ -1114,6 +1169,9 @@ cmd_rm() {
     echo "removed role $role; its folder stays: $(conf_get "$role" RC_DIR)"
     unwant "$role"
     rm -- "${CONF_DIR}/${role}.conf"
+    if [[ -n "$SHARED_CONF_DIR" && -d "$SHARED_CONF_DIR" ]]; then  # the other machine drops it too
+        rm -f -- "${SHARED_CONF_DIR}/${role}.conf"; touch -- "${SHARED_CONF_DIR}/${role}.removed"
+    fi
 }
 
 cmd_logs() {
@@ -1123,6 +1181,7 @@ cmd_logs() {
 
 [[ "${1:-}" == hook ]] && { shift; cmd_hook "$@"; exit 0; }  # also runs on machines without roles
 [[ -d "$CONF_DIR" ]] || die "no role configs in $CONF_DIR"
+sync_confs  # custom roles made on the other workstation become available here
 if remote_trips; then  # trip roles run on RC_TRIP_HOST: forward, never start them here
     case "${1:-}" in
         trip|trips) remote_rc "$@"; exit $? ;;
@@ -1161,5 +1220,6 @@ case "${1:-ls}" in
     handoff-done) shift; cmd_handoff_done "$@" ;;
     menu) cmd_menu ;;
     restore) cmd_restore ;;
+    sync-confs) cmd_sync_confs ;;
     *) usage ;;
 esac
