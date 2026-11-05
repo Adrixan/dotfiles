@@ -1191,7 +1191,7 @@ fi
 if [[ -n "${RC_REMOTE_ROLES:-}" && -n "${2:-}" ]]; then  # roles that live on another host: forward
     case "$1" in
         up|start|down|stop|restart|logs)
-            r="$(resolve "$2" 2>/dev/null || echo "$2")"
+            r="$(resolve "$2" 2>/dev/null)" || r="$2"  # no local conf needed for a remote role (die exits the subshell)
             if target="$(remote_role_target "$r")"; then
                 if systemctl --user is-active --quiet "$(unit "$r")"; then  # a stray local copy: only stop or read it here
                     [[ "$1" == up || "$1" == start || "$1" == restart ]] && die "$r also runs here: rc down $r stops this copy first (it belongs on $target)"
