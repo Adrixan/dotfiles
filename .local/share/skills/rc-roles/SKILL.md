@@ -117,7 +117,9 @@ busy-session guards.
   sessions (`notify_when_idle` works only on this machine), a session in another permission mode may
   hold the message for Peter's approval, and an offline (stopped) session gets nothing, so start the
   role first and prefer `--brief` for new sessions. Plain terminal sessions on other machines are not
-  listed. Results come back through the receiver's files (handoff, report, trip.md), not as a reply.
+  listed. The receiver can answer with SendMessage to the `from` address (`bridge:session_…`; tested
+  schulpc ↔ agentbox 2026-11-09), but do not wait for it: lasting results go to its files (handoff,
+  report, trip.md).
 - Afterwards tell Peter the session label to open and record the handoff in this session's own state
   (handoff, report or project `Memory/`).
 
