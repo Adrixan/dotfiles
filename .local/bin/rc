@@ -46,6 +46,9 @@
 #   rc project --list                       project folders with their role, state and last activity
 #   rc menu                                 running roles, stopped roles, trips, research, projects, RAM
 #   rc restore                              starts the roles that ran before a reboot (rc up marks them)
+#   rc quiet [--wait MIN]                   exit 0 once no running role (Greeter included) is in a turn
+#   rc prepare-reboot                       before an unattended reboot: keeps the running roles on the
+#                                           restore list and leaves each a note for its restored session
 #   rc sync-confs                           exchanges custom role confs with the other workstation now
 #                                           (every rc command does it first; ~/sync/ai/claude-rc)
 #   rc hook code-session|greeter-start|research-session|turn-done
@@ -86,6 +89,8 @@ OPTIONAL_PLUGINS=(dev research)  # travel retired 2026-11-04: trips run on the a
 # git repository, so it inherits the ~/code trust; auto mode edits the project outside that folder
 SLOTS_DIR="${CODE_DIR}/.rc"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-rc"
+REBOOT_NOTES_DIR="${STATE_DIR}/reboot-notes"  # <dir_key of RC_DIR>: date of an unattended update reboot
+REBOOT_NOTE_MAX_MIN=1440   # a note older than a day is stale
 # Custom role confs (marked with CUSTOM_MARKER) travel between the workstations through this Syncthing
 # folder, so a role made on one machine can start on the other (rc sync-confs; RC_SHARED_CONF_DIR= in
 # rc.env turns it off; RC_SHARED_EXCLUDE="<role> ..." keeps roles on this machine). Predefined roles come
@@ -981,6 +986,72 @@ focus_context() {  # additionalContext for a session focused on ~/code/<project>
     printf '%s' "Code session focused on the project $p (~/code/$p). It runs from $from, which inherits the ~/code trust, so no extra approval is needed; treat ~/code/$p as the project root: read its AGENTS.md (or CLAUDE.md) and .agents/ state files before acting, run commands and git there (cd ~/code/$p), and keep its handoff in ~/code/$p/.agents/session-handoff.md. Touch other ~/code projects only when Peter asks.$extra"
 }
 
+running_roles() {  # running_roles [--with-greeter]: roles whose server runs on this machine
+    local f role
+    for f in "${CONF_DIR}"/*.conf; do
+        [[ -e "$f" ]] || continue
+        role="$(basename "$f" .conf)"
+        [[ "$role" == greeter && "${1:-}" != --with-greeter ]] && continue
+        systemctl --user is-active --quiet "$(unit "$role")" && echo "$role"
+    done
+    return 0
+}
+
+cmd_quiet() {  # rc quiet [--wait MIN]: exit 0 once no running role is in a turn (nightly update reboot gate)
+    local wait=0 role deadline busy
+    if [[ "${1:-}" == --wait ]]; then
+        wait="${2:?--wait needs minutes}"
+        [[ "$wait" =~ ^[0-9]{1,3}$ ]] || die "--wait takes whole minutes"
+    fi
+    deadline=$(( $(date +%s) + wait * 60 ))
+    while :; do
+        busy=()
+        while read -r role; do
+            [[ -n "$role" ]] && in_turn "$role" && busy+=("$role")
+        done < <(running_roles --with-greeter)
+        if [[ ${#busy[@]} -eq 0 ]]; then echo "quiet: no role is in a turn"; return 0; fi
+        if [[ $(date +%s) -ge $deadline ]]; then echo "busy: ${busy[*]}"; return 1; fi
+        sleep 30
+    done
+}
+
+cmd_prepare_reboot() {  # before an unattended reboot: keep running roles wanted, leave each a note
+    local role dir n=0 when
+    when="$(date '+%F %H:%M')"
+    mkdir -p "$REBOOT_NOTES_DIR"; chmod 700 "$REBOOT_NOTES_DIR"
+    while read -r role; do
+        [[ -n "$role" ]] || continue
+        want "$role"
+        dir="$(conf_get "$role" RC_DIR)"
+        [[ -n "$dir" ]] && printf '%s\n' "$when" > "${REBOOT_NOTES_DIR}/$(dir_key "$dir")"
+        n=$((n + 1))
+    done < <(running_roles)
+    echo "prepared ${n} role(s) for the reboot"
+}
+
+take_reboot_note() {  # take_reboot_note <RC_DIR>: print the restored session's message once, or nothing
+    local f t when
+    [[ -n "${1:-}" ]] || return 0
+    f="${REBOOT_NOTES_DIR}/$(dir_key "$1")"
+    [[ -f "$f" ]] || return 0
+    t="${f}.taken.$$"
+    mv -- "$f" "$t" 2>/dev/null || return 0
+    if [[ -n "$(find "$t" -mmin +"$REBOOT_NOTE_MAX_MIN" 2>/dev/null)" ]]; then rm -f -- "$t"; return 0; fi
+    when="$(head -1 "$t")"; rm -f -- "$t"
+    printf '[reboot] %s restarted for its nightly updates (%s) and restored this session. Background tasks, monitors and waits from before the reboot are gone: check what you were working on or waiting for (.agents/session-handoff.md, your last messages) and continue it; if nothing was pending, reply with one short line and wait.' "$(hostname -s)" "$when"
+}
+
+hook_reboot_note() {  # global SessionStart hook: the note for roles without an own start hook
+    local note
+    cat >/dev/null
+    case "${RC_DIR:-}" in
+        ""|"$CODE_DIR"|"$SLOTS_DIR"/*|"$RESEARCH_SLOTS"/*|"$TRIPS_DIR"/*) return 0 ;;  # their own hooks deliver it
+    esac
+    note="$(take_reboot_note "$RC_DIR")"
+    [[ -n "$note" ]] || return 0
+    jq -n --arg m "$note" '{hookSpecificOutput: {hookEventName: "SessionStart", initialUserMessage: $m}}'
+}
+
 cmd_restore() {  # start the roles that ran before a reboot; prints one summary line, or nothing
     local f role out ok=() failed=()
     [[ -d "$WANTED_DIR" ]] || return 0
@@ -1062,7 +1133,7 @@ hook_turn_done() {  # Stop hook (~/.claude/settings.json): a turn of 1 min+ ends
 }
 
 hook_research_session() {  # SessionStart hook of research topic roles (helper folders in Research/.rc)
-    local input src slug slot topic job rid brief message=""
+    local input src slug slot topic job rid brief message="" note=""
     input="$(cat)"
     case "${RC_DIR:-}" in
         "$RESEARCH_SLOTS"/*) slug="${RC_DIR#"$RESEARCH_SLOTS"/}" ;;
@@ -1088,13 +1159,15 @@ hook_research_session() {  # SessionStart hook of research topic roles (helper f
         printf -v message '%s\n\nContext handed over with rc research --brief, verbatim:\n\n%s' "$message" "$brief"
     fi
     [[ -n "$rid" ]] && printf '%s\n' "$slug" > "${RESEARCH_REMOTE}/${rid}"
+    note="$(take_reboot_note "${RC_DIR:-}")"
+    if [[ -n "$note" ]]; then [[ -n "$message" ]] && message+=$'\n\n'; message+="$note"; fi
     jq -n --arg c "Deep-research session on the topic: ${topic}. Job folder: ~/Obsidian/Adrixan/Research/${job} (report.md with frontmatter status running|done, sources.md); follow ~/Obsidian/Adrixan/Research/AGENTS.md for storage, report and privacy rules and run \`rc research --index\` after changing the report. This session's handoff: ${slot/#$HOME/\~}/.agents/session-handoff.md. Peter may later resume this topic with \`rc research ${slug}\` from the Greeter. ${HANDOFF_RULE}" \
         --arg m "$message" \
         '{hookSpecificOutput: ({hookEventName: "SessionStart", additionalContext: $c} + (if $m == "" then {} else {initialUserMessage: $m} end))}'
 }
 
 hook_trip_session() {  # SessionStart hook of trip roles (Trips/<slug>/.claude/settings.json, added by rc trip)
-    local slug brief context message=""
+    local slug brief context message="" note=""
     cat >/dev/null
     case "${RC_DIR:-}" in
         "$TRIPS_DIR"/*) slug="${RC_DIR#"$TRIPS_DIR"/}" ;;
@@ -1106,6 +1179,8 @@ hook_trip_session() {  # SessionStart hook of trip roles (Trips/<slug>/.claude/s
     if [[ -n "$brief" ]]; then
         printf -v message '[trip-brief] Peter'"'"'s request for this trip, verbatim (also logged in brief.md):\n\n%s\n\nRead trip.md and .agents/session-handoff.md first if they exist, then plan on this basis; ask only what the request leaves open.' "$brief"
     fi
+    note="$(take_reboot_note "${RC_DIR:-}")"
+    if [[ -n "$note" ]]; then [[ -n "$message" ]] && message+=$'\n\n'; message+="$note"; fi
     jq -n --arg c "$context" --arg m "$message" \
         '{hookSpecificOutput: ({hookEventName: "SessionStart", additionalContext: $c} + (if $m == "" then {} else {initialUserMessage: $m} end))}'
 }
@@ -1115,6 +1190,7 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
         turn-done) hook_turn_done || true; return 0 ;;  # a failing Stop hook must never block a session
         research-session) hook_research_session; return 0 ;;
         trip-session) hook_trip_session; return 0 ;;
+        reboot-note) hook_reboot_note; return 0 ;;
     esac
     if [[ "${1:-}" == greeter-start ]]; then
         local restored
@@ -1125,7 +1201,7 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
         return 0
     fi
     [[ "${1:-}" == code-session ]] || usage
-    local input src sid rid project="" context message="" seen=no brief=""
+    local input src sid rid project="" context message="" seen=no brief="" note=""
     input="$(cat)"
     case "${RC_DIR:-}" in  # only sessions of rc's servers; an interactive `claude` stays untouched
         "$CODE_DIR") ;;
@@ -1157,6 +1233,8 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
     else
         context="General Code role session in ~/code without a chosen project. Unless Peter's first message names one, ask with AskUserQuestion which folder in ~/code to work on: run \`rc projects\` and offer the three most recently used by folder name plus \"New project\" (create ~/code/<name> with AGENTS.md and a CLAUDE.md containing @AGENTS.md); his free text takes any name. Then treat that folder as the project root: read its AGENTS.md and .agents/ state first, run commands and git there, keep its handoff in its .agents/. For a dedicated session per project (several in parallel), Peter uses the Greeter or \`rc code <project>\`. Projects whose .claude/settings.json denies MCP servers (client repositories) are off limits here: they need \`rc code --own <project>\`."
     fi
+    note="$(take_reboot_note "${RC_DIR:-}")"
+    if [[ -n "$note" ]]; then [[ -n "$message" ]] && message+=$'\n\n'; message+="$note"; fi
     jq -n --arg c "$context" --arg m "$message" \
         '{hookSpecificOutput: ({hookEventName: "SessionStart", additionalContext: $c} + (if $m == "" then {} else {initialUserMessage: $m} end))}'
 }
@@ -1338,6 +1416,8 @@ case "${1:-ls}" in
     handoff-done) shift; cmd_handoff_done "$@" ;;
     menu) cmd_menu ;;
     restore) cmd_restore ;;
+    quiet) shift; cmd_quiet "$@" ;;
+    prepare-reboot) cmd_prepare_reboot ;;
     sync-confs) cmd_sync_confs ;;
     *) usage ;;
 esac
