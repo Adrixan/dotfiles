@@ -1,0 +1,33 @@
+# Update reminder (ansible-opensuse-server role topgrade_nightly): at most one line per interactive
+# shell. Machines without a nightly timer (xps13) are reminded to run `update-system` once the last
+# run is a day old; machines with the timer only hear about a failed or stale run or a pending reboot.
+# Status file: "<epoch> <ok|failed> <reboot pending yes|no>", written by topgrade-nightly.
+if [[ -o interactive && -x /usr/local/bin/update-system ]]; then
+  () {
+    zmodload -F zsh/datetime p:EPOCHSECONDS 2>/dev/null || return 0
+    local f=/var/lib/topgrade-status epoch=0 result="" reboot=no days timer=no
+    systemctl is-enabled --quiet topgrade-nightly.timer 2>/dev/null && timer=yes
+    [[ -r $f ]] && read -r epoch result reboot < $f
+    [[ $epoch == <-> ]] || epoch=0
+    days=$(( (EPOCHSECONDS - epoch) / 86400 ))
+    local yellow=$'\e[33m' off=$'\e[0m'
+    if [[ $timer == no ]]; then
+      if (( epoch == 0 )); then
+        print -r -- "${yellow}Updates:${off} no update-system run recorded yet; run: update-system"
+      elif [[ $result == failed ]]; then
+        print -r -- "${yellow}Updates:${off} the last update-system run failed (${days} d ago); see journalctl -u 'update-system-*', then run: update-system"
+      elif (( days >= 1 )); then
+        print -r -- "${yellow}Updates:${off} last update-system run ${days} d ago; run: update-system"
+      fi
+      [[ $reboot == yes ]] && print -r -- "${yellow}Updates:${off} a reboot is pending to finish the last update"
+    else
+      if [[ $result == failed ]]; then
+        print -r -- "${yellow}Updates:${off} the nightly update failed (${days} d ago); see journalctl -u topgrade-nightly, or run: update-system"
+      elif (( epoch > 0 && days > 2 )); then
+        print -r -- "${yellow}Updates:${off} no nightly update for ${days} days; check topgrade-nightly.timer, or run: update-system"
+      elif [[ $reboot == yes ]]; then
+        print -r -- "${yellow}Updates:${off} a reboot is pending after the nightly update (a reboot gate held it back; see journalctl -u topgrade-nightly)"
+      fi
+    fi
+  }
+fi

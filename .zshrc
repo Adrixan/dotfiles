@@ -1,6 +1,7 @@
 source ~/.config/zsh/aliases
 source ~/.config/zsh/env
 source ~/.config/zsh/grml
+[ -f ~/.config/zsh/update-reminder ] && source ~/.config/zsh/update-reminder
 
 export PATH="$HOME/.local/bin:$PATH"
 
