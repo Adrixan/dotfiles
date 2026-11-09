@@ -18,18 +18,21 @@
 #          [--description TEXT] [--args "--spawn worktree"]
 #   rc rm <name> [--force]                  custom roles only; keeps the folder
 #   rc logs <role> [lines]
-#   rc trip <destination> [up options]      role trip-<slug> in ~/Obsidian/Adrixan/Travel/Trips/<slug>
-#                                           (created on first use, resumed later)
+#   rc trip <destination> [--brief TEXT|-] [up options]
+#                                           role trip-<slug> in ~/Obsidian/Adrixan/Travel/Trips/<slug>
+#                                           (created on first use, resumed later); --brief: Peter's full
+#                                           request (- reads stdin), logged in brief.md and handed to the
+#                                           next session as its first message (rc code|research take it too)
 #   rc trips                                trip roles, most recently active first
 #                                           (with RC_TRIP_HOST in rc.env these and rc up/down/restart/logs/rm trip-* forward there)
 #   rc projects                             folders in ~/code, most recently used first
-#   rc code <project> [up options]          role code-<project>, served from the helper folder
+#   rc code <project> [--brief TEXT|-] [up options]  role code-<project>, served from the helper folder
 #                                           ~/code/.rc/<project> (inherits the ~/code trust), any
 #                                           number in parallel
 #   rc code --new <name> [up options]       creates ~/code/<name> with a minimal AGENTS.md first
 #   rc code --own <project> [up options]    own role code-<project> in the project folder (client repos;
 #                                           needs the repository's own trust)
-#   rc research "<topic>" [up options]      role research-<slug> from the helper folder
+#   rc research "<topic>" [--brief TEXT|-] [up options]  role research-<slug> from the helper folder
 #                                           ~/Obsidian/Adrixan/Research/.rc/<slug>: starts a deep research
 #                                           on the topic (report in Research/Reports/), auto-stop after 8 h;
 #                                           an existing topic (slug or role) resumes
@@ -104,6 +107,13 @@ RESEARCH_SLOTS="${RESEARCH_DIR}/.rc"
 REPORTS_DIR="${RESEARCH_DIR}/Reports"
 RESEARCH_TTL=8h
 RESEARCH_REMOTE="${STATE_DIR}/research-remote"  # cse_<id> of sessions that already got their start turn
+# Handoff briefs (Peter, 2026-11-09): `rc trip|code|research ... --brief TEXT` (or `--brief -` from stdin)
+# queues the full request or context for the role's next session; its start hook hands it over as the
+# first message. Never queued for a running role (its session gets it by SendMessage instead).
+BRIEFS_DIR="${STATE_DIR}/briefs"  # <role>: pending brief
+BRIEF_MAX=20000
+BRIEF=""; BRIEF_SET=no; UP_ARGS=()
+HANDOFF_RULE="Expert sessions: work that belongs to another role (code or tool development, a deep research, a trip, a vault project, educator) goes to that role's session, not here: start it with rc (rc code <project> or rc code --new <name>, rc research, rc trip, rc project, rc up educator), pass the full context with --brief - (stdin) or, for a running session, with SendMessage (ListAgents lists sessions on the other machines too), and tell Peter the label; see the skill rc-roles."
 RC_BIN="$(realpath -- "$0")"
 RESUME_HOURS=4
 
@@ -579,22 +589,81 @@ Trip planning role for $1, one of several trips planned in parallel (each trip h
 - Keep this trip's state in this folder so a later session can restore it: \`trip.md\` (dates,
   travellers, decisions, open questions, trip-planner slug) and \`.agents/session-handoff.md\`, both
   updated after every planning step.
+- Peter's requests for this trip, verbatim, are in \`brief.md\` (newest last; \`rc trip --brief\` writes it
+  and the start hook hands the newest to a new session): plan on that basis, not on the destination alone.
 - Publish through MCP \`trip-planner\` (one slug per trip; new documents start hidden), look things up
   with \`trip-scout\`. Write German, "du" form, for the participants.
 EOF
 }
 
+parse_brief() {  # parse_brief <args...>: --brief TEXT|- into BRIEF, the other args into UP_ARGS
+    BRIEF=""; BRIEF_SET=no; UP_ARGS=()
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" == --brief ]]; then
+            [[ $# -ge 2 ]] || die "--brief needs a text, or - to read it from stdin"
+            BRIEF="$2"; BRIEF_SET=yes; shift 2
+        else
+            UP_ARGS+=("$1"); shift
+        fi
+    done
+    [[ "$BRIEF_SET" == yes ]] || return 0
+    [[ "$BRIEF" == - ]] && BRIEF="$(head -c "$((BRIEF_MAX * 4 + 1))")"  # bytes; the limit below counts characters
+    [[ -n "${BRIEF//[[:space:]]/}" ]] || die "--brief is empty"
+    [[ ${#BRIEF} -le $BRIEF_MAX ]] || die "--brief: at most $BRIEF_MAX characters"
+    return 0
+}
+
+queue_brief() {  # queue_brief <role>: BRIEF for the role's next session, taken by its start hook
+    [[ "$BRIEF_SET" == yes ]] || return 0
+    if systemctl --user is-active --quiet "$(unit "$1")"; then
+        echo "brief not queued: $1 is already running; send the brief to its session \"$(conf_get "$1" RC_NAME)\" with SendMessage (ListAgents)"
+        return 0
+    fi
+    mkdir -p "$BRIEFS_DIR"; chmod 700 "$BRIEFS_DIR"
+    (umask 077; printf '%s\n' "$BRIEF" > "${BRIEFS_DIR}/$1.tmp") && mv -- "${BRIEFS_DIR}/$1.tmp" "${BRIEFS_DIR}/$1"
+    echo "brief queued: the new session gets it as its first message"
+}
+
+take_brief() {  # take_brief <role>: print and remove the pending brief (atomic: one session takes it)
+    local f="${BRIEFS_DIR}/$1" t
+    [[ "$1" =~ ^[a-z][a-z0-9-]{1,39}$ && -f "$f" ]] || return 0
+    t="${f}.taken.$$"
+    mv -- "$f" "$t" 2>/dev/null || return 0
+    cat -- "$t"; rm -f -- "$t"
+}
+
+trip_hook() {  # the trip folder's settings get the start hook that hands over a queued brief
+    local s="$1/.claude/settings.json" c="\"\$HOME/.local/bin/rc\" hook trip-session" cur='{}' new
+    mkdir -p "$1/.claude"
+    [[ -s "$s" ]] && { cur="$(jq -c . "$s" 2>/dev/null)" || { echo "rc: $s is not valid JSON; start hook not added" >&2; return 0; }; }
+    jq -e --arg c "$c" 'any(.hooks.SessionStart[]?.hooks[]?; .command == $c)' <<< "$cur" >/dev/null && return 0
+    new="$(jq --arg c "$c" '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher: "startup|resume|compact", hooks: [{type: "command", command: $c}]}])' <<< "$cur")"
+    printf '%s\n' "$new" > "$s.tmp" && mv -- "$s.tmp" "$s"
+}
+
+log_trip_brief() {  # brief.md in the trip folder: every request, verbatim, newest last (synced with the folder)
+    local f="$1/brief.md"
+    [[ "$BRIEF_SET" == yes ]] || return 0
+    [[ -e "$f" ]] || printf '# Trip requests\n\nPeter'"'"'s requests for this trip, verbatim, newest last (written by `rc trip --brief`).\n' > "$f"
+    printf '\n## %s\n\n%s\n' "$(date '+%F %H:%M')" "$BRIEF" >> "$f"
+}
+
 cmd_trip() {
-    local dest="${1:?destination missing}" slug role
+    local dest="${1:?destination missing}" slug role dir
     shift
+    parse_brief "$@"
     slug="$(slugify "$dest")"
     [[ -n "$slug" ]] || die "destination needs letters or digits: $dest"
-    role="trip-${slug}"
+    role="trip-${slug}"; dir="${TRIPS_DIR}/${slug}"
     if [[ ! -e "${CONF_DIR}/${role}.conf" ]]; then
-        cmd_new "$role" --label "Trip ${dest}" --dir "${TRIPS_DIR}/${slug}" --plugins research \
+        cmd_new "$role" --label "Trip ${dest}" --dir "$dir" --plugins research \
             --description "Trip planning: ${dest}" --brief "$(trip_brief "$dest")"
     fi
-    cmd_up "$role" "$@"
+    dir="$(conf_get "$role" RC_DIR)"
+    trip_hook "$dir"
+    log_trip_brief "$dir"
+    queue_brief "$role"
+    cmd_up "$role" "${UP_ARGS[@]}"
 }
 
 cmd_trips() {
@@ -744,13 +813,15 @@ cmd_research() {
     local topic="${1:?topic missing (or --index)}" slug role slot job short a args=() ttl=no
     shift
     [[ "$topic" == --index ]] && { research_index; echo "wrote ${RESEARCH_DIR}/index.md"; return; }
-    for a in "$@"; do [[ "$a" == --ttl ]] && ttl=yes; done
-    args=("$@"); [[ "$ttl" == yes ]] || args+=(--ttl "$RESEARCH_TTL")
+    parse_brief "$@"
+    for a in "${UP_ARGS[@]}"; do [[ "$a" == --ttl ]] && ttl=yes; done
+    args=("${UP_ARGS[@]}"); [[ "$ttl" == yes ]] || args+=(--ttl "$RESEARCH_TTL")
     [[ "$topic" != *$'\n'* && ${#topic} -le 500 ]] || die "topic: one line, at most 500 characters"
     slug="$(slugify "${topic#research-}" | cut -c1-31 | sed 's/-$//')"  # role names: 40 chars, 9 for research-
     [[ -n "$slug" ]] || die "topic needs letters or digits: $topic"
     role="research-${slug}"
     if [[ -e "${CONF_DIR}/${role}.conf" ]]; then  # existing topic: resume it
+        queue_brief "$role"
         cmd_up "$role" "${args[@]}"
         return
     fi
@@ -764,6 +835,7 @@ cmd_research() {
     research_index
     short="$(tr -d '"$`\\' <<< "$topic" | cut -c1-40)"
     cmd_new "$role" --label "Research: ${short}" --dir "$slot" --description "Deep research: ${short}" --no-files
+    queue_brief "$role"
     cmd_up "$role" "${args[@]}"
 }
 
@@ -854,11 +926,12 @@ make_slot() {  # helper folder of a project role: only the focus hook, written b
 }
 
 cmd_code() {
-    local project="${1:?project missing}" own=no dir role slot
+    local project="${1:?project missing}" own=no new=no dir role slot
     shift
     if [[ "$project" == --own ]]; then own=yes; project="${1:?project missing}"; shift; fi
-    if [[ "$project" == --new ]]; then
-        project="${1:?name missing}"; shift
+    if [[ "$project" == --new ]]; then new=yes; project="${1:?name missing}"; shift; fi
+    parse_brief "$@"; set -- "${UP_ARGS[@]}"
+    if [[ "$new" == yes ]]; then
         [[ "$project" =~ $PROJECT_RE ]] || die "project name: letters, digits, dot, underscore, hyphen"
         dir="${CODE_DIR}/${project}"
         [[ -e "$dir" ]] && die "$dir exists: use rc code $project"
@@ -874,6 +947,7 @@ cmd_code() {
     role="$(code_role "$project")"
     if [[ -e "${CONF_DIR}/${role}.conf" ]]; then  # existing project role (helper folder or --own)
         [[ "$own" == yes && "$(conf_get "$role" RC_DIR)" != "$dir" ]] && die "$role runs from its helper folder: rc rm $role first"
+        code_brief "$role"
         cmd_up "$role" "$@"
         return
     fi
@@ -885,7 +959,16 @@ cmd_code() {
         make_slot "$slot"
         cmd_new "$role" --label "Code: ${project}" --dir "$slot" --description "Code project ${project}" --no-files
     fi
+    code_brief "$role"
     cmd_up "$role" "$@"
+}
+
+code_brief() {  # only helper-folder roles run the code-session start hook; an own role gets it by SendMessage
+    if [[ "$BRIEF_SET" == yes && "$(conf_get "$1" RC_DIR)" != "$SLOTS_DIR"/* ]]; then
+        echo "brief not queued: $1 runs in the repository without rc's start hook; send the brief to \"$(conf_get "$1" RC_NAME)\" with SendMessage (ListAgents) once it appears"
+        return 0
+    fi
+    queue_brief "$1"
 }
 
 focus_context() {  # additionalContext for a session focused on ~/code/<project>
@@ -976,7 +1059,7 @@ hook_turn_done() {  # Stop hook (~/.claude/settings.json): a turn of 1 min+ ends
 }
 
 hook_research_session() {  # SessionStart hook of research topic roles (helper folders in Research/.rc)
-    local input src slug slot topic job rid message=""
+    local input src slug slot topic job rid brief message=""
     input="$(cat)"
     case "${RC_DIR:-}" in
         "$RESEARCH_SLOTS"/*) slug="${RC_DIR#"$RESEARCH_SLOTS"/}" ;;
@@ -996,9 +1079,31 @@ hook_research_session() {  # SessionStart hook of research topic roles (helper f
             message="[deep-research] ${topic}: read report.md, sources.md and the handoff, then reply with a short status (report status, main findings, open questions) and ask what to dig into next."
         fi
     fi
+    brief="$(take_brief "research-${slug}")"
+    if [[ -n "$brief" ]]; then
+        [[ -n "$message" ]] || message="[deep-research] ${topic}: read report.md, sources.md and the handoff first, then continue with the context below."
+        printf -v message '%s\n\nContext handed over with rc research --brief, verbatim:\n\n%s' "$message" "$brief"
+    fi
     [[ -n "$rid" ]] && printf '%s\n' "$slug" > "${RESEARCH_REMOTE}/${rid}"
-    jq -n --arg c "Deep-research session on the topic: ${topic}. Job folder: ~/Obsidian/Adrixan/Research/${job} (report.md with frontmatter status running|done, sources.md); follow ~/Obsidian/Adrixan/Research/AGENTS.md for storage, report and privacy rules and run \`rc research --index\` after changing the report. This session's handoff: ${slot/#$HOME/\~}/.agents/session-handoff.md. Peter may later resume this topic with \`rc research ${slug}\` from the Greeter." \
+    jq -n --arg c "Deep-research session on the topic: ${topic}. Job folder: ~/Obsidian/Adrixan/Research/${job} (report.md with frontmatter status running|done, sources.md); follow ~/Obsidian/Adrixan/Research/AGENTS.md for storage, report and privacy rules and run \`rc research --index\` after changing the report. This session's handoff: ${slot/#$HOME/\~}/.agents/session-handoff.md. Peter may later resume this topic with \`rc research ${slug}\` from the Greeter. ${HANDOFF_RULE}" \
         --arg m "$message" \
+        '{hookSpecificOutput: ({hookEventName: "SessionStart", additionalContext: $c} + (if $m == "" then {} else {initialUserMessage: $m} end))}'
+}
+
+hook_trip_session() {  # SessionStart hook of trip roles (Trips/<slug>/.claude/settings.json, added by rc trip)
+    local slug brief context message=""
+    cat >/dev/null
+    case "${RC_DIR:-}" in
+        "$TRIPS_DIR"/*) slug="${RC_DIR#"$TRIPS_DIR"/}" ;;
+        *) return 0 ;;
+    esac
+    [[ "$slug" =~ ^[a-z0-9-]+$ ]] || return 0
+    context="Trip session for ~/Obsidian/Adrixan/Travel/Trips/${slug}. Peter's requests for this trip, verbatim, are in brief.md in this folder (newest last); read it with trip.md and .agents/session-handoff.md before planning. ${HANDOFF_RULE}"
+    brief="$(take_brief "trip-${slug}")"
+    if [[ -n "$brief" ]]; then
+        printf -v message '[trip-brief] Peter'"'"'s request for this trip, verbatim (also logged in brief.md):\n\n%s\n\nRead trip.md and .agents/session-handoff.md first if they exist, then plan on this basis; ask only what the request leaves open.' "$brief"
+    fi
+    jq -n --arg c "$context" --arg m "$message" \
         '{hookSpecificOutput: ({hookEventName: "SessionStart", additionalContext: $c} + (if $m == "" then {} else {initialUserMessage: $m} end))}'
 }
 
@@ -1006,6 +1111,7 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
     case "${1:-}" in
         turn-done) hook_turn_done || true; return 0 ;;  # a failing Stop hook must never block a session
         research-session) hook_research_session; return 0 ;;
+        trip-session) hook_trip_session; return 0 ;;
     esac
     if [[ "${1:-}" == greeter-start ]]; then
         local restored
@@ -1016,7 +1122,7 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
         return 0
     fi
     [[ "${1:-}" == code-session ]] || usage
-    local input src sid rid project="" context message="" seen=no
+    local input src sid rid project="" context message="" seen=no brief=""
     input="$(cat)"
     case "${RC_DIR:-}" in  # only sessions of rc's servers; an interactive `claude` stays untouched
         "$CODE_DIR") ;;
@@ -1042,6 +1148,9 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
         context="$(focus_context "$project" "${RC_DIR/#$HOME/\~}")"
         # A reattached session already knows its project; a new one starts with a status turn
         [[ "$src" == startup && "$seen" == no ]] && message="[code-focus] ${project}: read the project's AGENTS.md and .agents/ state, then reply with a short status (branch, uncommitted changes, next steps from the handoff) and ask what to do."
+        brief="$(take_brief "$(code_role "$project")")"
+        [[ -n "$brief" ]] && printf -v message '[handoff] %s: context handed over with rc code --brief, verbatim:\n\n%s\n\nRead the project'"'"'s AGENTS.md and .agents/ state first, then take this over; tell Peter in one line what you took over.' "$project" "$brief"
+        context+=" ${HANDOFF_RULE}"
     else
         context="General Code role session in ~/code without a chosen project. Unless Peter's first message names one, ask with AskUserQuestion which folder in ~/code to work on: run \`rc projects\` and offer the three most recently used by folder name plus \"New project\" (create ~/code/<name> with AGENTS.md and a CLAUDE.md containing @AGENTS.md); his free text takes any name. Then treat that folder as the project root: read its AGENTS.md and .agents/ state first, run commands and git there, keep its handoff in its .agents/. For a dedicated session per project (several in parallel), Peter uses the Greeter or \`rc code <project>\`. Projects whose .claude/settings.json denies MCP servers (client repositories) are off limits here: they need \`rc code --own <project>\`."
     fi
@@ -1184,7 +1293,13 @@ cmd_logs() {
 sync_confs  # custom roles made on the other workstation become available here
 if remote_trips; then  # trip roles run on RC_TRIP_HOST: forward, never start them here
     case "${1:-}" in
-        trip|trips) remote_rc "$@"; exit $? ;;
+        trips) remote_rc "$@"; exit $? ;;
+        trip)  # a brief travels on stdin: arguments pass two shells and sudo -i, which would mangle newlines
+            parse_brief "${@:3}"
+            if [[ "$BRIEF_SET" == yes ]]; then
+                printf '%s\n' "$BRIEF" | remote_rc trip "${2:-}" "${UP_ARGS[@]}" --brief -; exit $?
+            fi
+            remote_rc "$@"; exit $? ;;
         up|start|down|stop|restart|logs|rm|remove) [[ "${2:-}" == trip-* ]] && { remote_rc "$@"; exit $?; } ;;
     esac
 fi

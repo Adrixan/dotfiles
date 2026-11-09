@@ -45,7 +45,10 @@ busy-session guards.
 - Trips, several in parallel: `rc trip <destination> [up options]` creates the role `trip-<slug>` on first
   use (folder `~/Obsidian/Adrixan/Travel/Trips/<slug>` with the trip brief and the research plugin)
   and starts or resumes it later; `rc trips` lists them. Each trip keeps `trip.md` and its handoff in its
-  folder, so it can be restored after any pause. Since 2026-11-04 trip roles run on the agentbox
+  folder, so it can be restored after any pause. `--brief "<text>"` (or `--brief -` with the text on
+  stdin) carries Peter's full request: rc appends it to the trip's `brief.md` and queues it, and the trip
+  folder's start hook (`rc hook trip-session`, added by `rc trip`) hands it to the next new session as its
+  first message. Always pass his whole wording, never only the destination. Since 2026-11-04 trip roles run on the agentbox
   (`RC_TRIP_HOST=agentbox` in schulpc's `~/.config/claude-rc/rc.env`): `rc trip`, `rc trips` and
   `rc up|down|restart|logs|rm trip-*` forward there over SSH, the same commands work as before, and the
   folder syncs back through Syncthing. Never start a trip role on schulpc while it runs there.
@@ -89,6 +92,34 @@ busy-session guards.
   (`rc hook greeter-start`) runs `rc restore` first, which starts every wanted role that is not running,
   and adds what it restarted or could not restart to the start message. A `--ttl` does not survive a
   reboot.
+
+## Handing work to the right session (Peter, 2026-11-09)
+- Every session switches to the expert session instead of doing another role's work: code and tool
+  development (scripts beyond a quick lookup, a new tool, a repo) → `rc code <project>` or
+  `rc code --new <name>`; a deep research → `rc research "<topic>"`; trip planning → `rc trip`; a vault
+  project → `rc project`; educator content → `rc up educator` (runs on edu-micro). Not in a role session
+  of the wrong kind, and not by asking Peter for permission prompts in a folder that is not made for it.
+- Brief for a new or stopped session: add `--brief -` and pipe the context on stdin
+  (`printf '%s\n' "$text" | rc code <project> --brief -`; `rc trip` and `rc research` take it too, max
+  20000 characters). The role's start hook hands it over as the first message (`[handoff]`,
+  `[trip-brief]`, or appended to the `[deep-research]` start). The brief holds: Peter's request verbatim,
+  goal, what is known or decided (paths of reports, notes, files), constraints, and what to report back.
+  No secrets; student and family data only where the receiving role is allowed to hold them.
+- Running session: rc does not queue a brief (it says so); send it with `SendMessage` to the session
+  found with `ListAgents`. Own repo roles (`rc code --own`) have no rc start hook either: SendMessage once
+  the session is listed (about 30 s after `rc up`).
+- Other machines: `rc trip` forwards to the agentbox (`RC_TRIP_HOST`), `rc up|down|restart|logs educator`
+  to edu-micro (`RC_REMOTE_ROLES`); a trip brief travels on stdin over SSH. `rc up` takes no brief, so the
+  educator gets its context by SendMessage once its session is listed. `ListAgents` in a Remote Control
+  session also lists the Remote Control sessions of Peter's account on the other machines (kind
+  "Remote Control", label = role label, e.g. "Trip Ljubljana", "educator", "Travel Greeter"), and
+  `SendMessage` with that name delivers there. Limits: no delivery or idle notice comes back from those
+  sessions (`notify_when_idle` works only on this machine), a session in another permission mode may
+  hold the message for Peter's approval, and an offline (stopped) session gets nothing, so start the
+  role first and prefer `--brief` for new sessions. Plain terminal sessions on other machines are not
+  listed. Results come back through the receiver's files (handoff, report, trip.md), not as a reply.
+- Afterwards tell Peter the session label to open and record the handoff in this session's own state
+  (handoff, report or project `Memory/`).
 
 ## How to act
 - On a greeting or "what's running": run `rc ls` and answer with a short menu: running roles first (label,
