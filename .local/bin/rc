@@ -59,6 +59,16 @@
 
 set -euo pipefail
 
+# A shell without a logind session (console or SSH login with a broken PAM session, su, cron, tmux
+# started outside one) lacks these, and every systemctl/journalctl --user call then fails. With
+# linger the user manager still runs, so point at its runtime dir and bus (2026-11-09, text mode).
+if [[ -z "${XDG_RUNTIME_DIR:-}" && -d "/run/user/$(id -u)" ]]; then
+    export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+fi
+if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" && -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/bus" ]]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+fi
+
 CONF_DIR="${HOME}/.config/claude-rc"
 ROLES_ROOT="${HOME}/Obsidian/Adrixan/AI/Roles"
 TRIPS_DIR="${HOME}/Obsidian/Adrixan/Travel/Trips"
