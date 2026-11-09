@@ -112,7 +112,7 @@ busy-session guards.
   to edu-micro (`RC_REMOTE_ROLES`); a trip brief travels on stdin over SSH. `rc up` takes no brief, so the
   educator gets its context by SendMessage once its session is listed. `ListAgents` in a Remote Control
   session also lists the Remote Control sessions of Peter's account on the other machines (kind
-  "Remote Control", label = role label, e.g. "Trip Ljubljana", "educator", "Travel Greeter"), and
+  "Remote Control", label = role label, e.g. "Trip <destination>", "educator", "Travel Greeter"), and
   `SendMessage` with that name delivers there. Limits: no delivery or idle notice comes back from those
   sessions (`notify_when_idle` works only on this machine), a session in another permission mode may
   hold the message for Peter's approval, and an offline (stopped) session gets nothing, so start the
