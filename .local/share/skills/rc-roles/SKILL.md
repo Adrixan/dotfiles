@@ -54,7 +54,8 @@ busy-session guards.
   (`code-ptsd` on schulpc). A role runs on one machine at a time: `rc up` (also through `rc code`,
   `rc research`, `rc project`) refuses while the other workstation runs it and names the stop command
   (`rc down <role> --on <host>`); an unreachable peer only gives a note. `rc restore` skips the check.
-  xps13 has workspace trust only for the folders Peter accepted there (`cd <folder> && claude` once).
+  xps13 has workspace trust only for the folders Peter accepted there (`cd <folder> && claude` once;
+  `rc-trust-all` in a terminal walks him through every missing one plus the Remote Control consent).
 - Trips, several in parallel: `rc trip <destination> [up options]` creates the role `trip-<slug>` on first
   use (folder `~/Obsidian/Adrixan/Travel/Trips/<slug>` with the trip brief and the research plugin)
   and starts or resumes it later; `rc trips` lists them. Each trip keeps `trip.md` and its handoff in its
@@ -162,5 +163,6 @@ busy-session guards.
 - After `rc up`, tell Peter the session label to open in the Claude app; it appears within about 30 s.
   A role stopped less than about 2 minutes ago starts with a delay (the unit retries).
 - A folder that is not trusted yet cannot start: tell Peter to run `cd <folder> && claude` once in a
-  terminal and accept the dialog. Do not edit `~/.claude.json` to grant trust.
+  terminal and accept the dialog (`rc-trust-all` does this for every rc root still missing; `--list` shows
+  the state, `--peer schulpc` adds the repositories schulpc trusts). Do not edit `~/.claude.json` to grant trust.
 - Stopping the role that hosts the current session ends this conversation; say so before doing it.
