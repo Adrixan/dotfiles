@@ -423,14 +423,18 @@ stop_now() {
 }
 
 ls_running() {  # one line per running role except the Greeter: label, role, sessions, last activity, MB, pending stop
-    local f role idle stop label n=0
+    local f role idle stop label state n=0
     for f in "${CONF_DIR}"/*.conf; do
         [[ -e "$f" ]] || continue
         role="$(basename "$f" .conf)"
         [[ "$role" == greeter ]] && continue
-        systemctl --user is-active --quiet "$(unit "$role")" || continue
-        idle="$(last_active_min "$role")"; stop="$(stop_pending "$role")"
+        state="$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)"
         label="$(conf_get "$role" RC_NAME)"
+        if [[ "$state" == activating ]]; then  # starting, or retrying a failed start (rc logs says why)
+            printf '  %s (%s): starting or retrying, see rc logs %s\n' "${label:-$role}" "$role" "$role"; n=$((n + 1)); continue
+        fi
+        [[ "$state" == active ]] || continue
+        idle="$(last_active_min "$role")"; stop="$(stop_pending "$role")"
         printf '  %s (%s): %s sess%s, %s MB%s\n' "${label:-$role}" "$role" "$(sessions "$role")" \
             "${idle:+, ${idle} min ago}" "$(memory_mb "$role")" "${stop:+, STOPPING by $(date -d "@$stop" +%H:%M)}"
         n=$((n + 1))
@@ -576,6 +580,11 @@ cmd_down() {  # stop after the handoff (bounded wait) or at once; idle notices a
         systemctl --user is-active --quiet "$(unit "$role")" && want "$role"
         return
     fi
+    case "$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)" in
+        activating|reloading)  # starting, or retrying after a failed start (Restart=always): no session to hand off
+            systemctl --user stop "rc-stop-${role}.service" 2>/dev/null || true
+            stop_now "$role"; echo "stopped $role (it was still starting or retrying a failed start)"; return ;;
+    esac
     systemctl --user is-active --quiet "$(unit "$role")" || { unwant "$role"; rm -f -- "${STOPPING_DIR}/${role}"; echo "$role is not running"; return; }
     if [[ "$mode" == now || "$(sessions "$role")" -eq 0 ]]; then
         systemctl --user stop "rc-stop-${role}.service" 2>/dev/null || true
