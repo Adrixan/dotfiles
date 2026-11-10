@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# rc-trust-all: walk Peter through the Claude Code workspace-trust dialogs this machine needs for the rc roles,
+# then the one-time Remote Control consent. It never writes trust itself: for each folder that is not trusted yet
+# it runs `claude` there, Peter accepts the dialog and exits. ~/.claude.json is only read.
+#
+# Usage: rc-trust-all [--peer HOST] [--list] [--no-consent] [--consent]
+#   --peer HOST   also offer every folder HOST trusts (read over SSH, read-only) that exists here
+#   --list        print the folders and their state, open nothing
+#   --no-consent  skip the Remote Control consent step
+#   --consent     run the consent step even when this machine has used Remote Control before
+#
+# Rules it follows (knowledge map, "Claude Code"): a non-git folder inherits trust from a trusted parent, a git
+# repository needs its own; the rc roots below cover every helper folder rc creates (code-*, research-*, project-*).
+set -euo pipefail
+
+CONF_DIR="${HOME}/.config/claude-rc"
+CLAUDE_JSON="${HOME}/.claude.json"
+CODE_DIR="${HOME}/code"
+VAULT="${HOME}/Obsidian/Adrixan"
+CONSENT_DIR="${CODE_DIR}/.rc/.consent"   # trusted through ~/code, never served by a role
+
+die() { printf 'rc-trust-all: %s\n' "$*" >&2; exit 1; }
+usage() { sed -n '5,10p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+peer="" list=no consent=auto
+while (($#)); do
+    case "$1" in
+        --peer) peer="${2:?--peer needs a host}"; shift ;;
+        --list) list=yes ;;
+        --no-consent) consent=no ;;
+        --consent) consent=yes ;;
+        -h|--help) usage 0 ;;
+        *) usage 1 >&2 ;;
+    esac
+    shift
+done
+[[ "$peer" =~ ^[A-Za-z0-9._-]+$ || -z "$peer" ]] || die "invalid host: $peer"
+command -v jq >/dev/null || die "jq missing"
+command -v claude >/dev/null || die "claude missing"
+[[ -r "$CLAUDE_JSON" ]] || die "$CLAUDE_JSON not readable"
+
+# Per-machine forwarding (rc.env): roles that run elsewhere need no trust here
+RC_TRIP_HOST=""
+if [[ -r "${CONF_DIR}/rc.env" ]]; then
+    RC_TRIP_HOST="$(sed -n 's/^RC_TRIP_HOST=["'"'"']\{0,1\}\([^"'"'"']*\).*/\1/p' "${CONF_DIR}/rc.env" | tail -1)"
+fi
+
+# rc roots: every role folder rc serves lives in one of them (or is its own git repo)
+roots=(
+    "${VAULT}/AI/Greeter"
+    "$CODE_DIR"
+    "${HOME}/Obsidian/Ph.D."
+    "${VAULT}/Teaching"
+    "${VAULT}/Research"
+    "${VAULT}/AI/Claude.ai/Projects"
+    "${VAULT}/AI/Roles"
+)
+# Trips run here only without forwarding; the educator folder sits below Projects either way
+if [[ -z "$RC_TRIP_HOST" ]]; then roots+=("${VAULT}/Travel"); fi
+
+git_top() { git -C "$1" rev-parse --show-toplevel 2>/dev/null || true; }
+
+under_root() {  # 0 when a non-git folder sits below one of the rc roots
+    local d="$1" r
+    for r in "${roots[@]}"; do [[ "$d" == "$r"/* ]] && return 0; done
+    return 1
+}
+
+client_repo() {  # same test as rc: claude-client-init denials in the repo's settings
+    local s="$1/.claude/settings.json"
+    [[ -r "$s" ]] && jq -e '((.deniedMcpServers // []) | length > 0) or .disableClaudeAiConnectors == true' "$s" >/dev/null 2>&1
+}
+
+declare -A seen=()
+folders=()
+add() {
+    local d="${1%/}"
+    [[ -d "$d" && -z "${seen[$d]:-}" ]] || return 0
+    seen[$d]=1
+    folders+=("$d")
+}
+
+for r in "${roots[@]}"; do add "$r"; done
+# role folders outside the roots and own-trust roles (rc code --own <repo>)
+shopt -s nullglob
+for c in "${CONF_DIR}"/*.conf; do
+    d="$(sed -n 's/^RC_DIR="\(.*\)"$/\1/p' "$c" | head -1)"
+    [[ -n "$d" && -d "$d" ]] || continue
+    top="$(git_top "$d")"
+    if [[ -n "$top" ]]; then add "$top"; elif ! under_root "$d"; then add "$d"; fi
+done
+# client repositories need their own trust for rc code --own
+for d in "${CODE_DIR}"/*/; do
+    d="${d%/}"
+    if client_repo "$d"; then add "$d"; fi
+done
+shopt -u nullglob
+# folders the peer trusts, if asked (its ~/.claude.json is only read)
+if [[ -n "$peer" ]]; then
+    peer_list="$(timeout 30 ssh -o BatchMode=yes "$peer" \
+        'jq -r ".projects // {} | to_entries[] | select(.value.hasTrustDialogAccepted == true) | .key" ~/.claude.json' 2>/dev/null)" \
+        || die "could not read the trusted folders of $peer"
+    while IFS= read -r d; do
+        [[ -n "$d" && "$d" != */.claude/worktrees/* && "$d" == "$HOME"/* && -d "$d" ]] || continue
+        if [[ -z "$(git_top "$d")" ]] && under_root "$d"; then continue; fi  # inherits from an rc root
+        add "$d"
+    done <<< "$peer_list"
+fi
+
+trusted() {  # read-only: a git repo needs its own entry, any other folder inherits from a trusted parent
+    local d="$1" top cands=()
+    top="$(git_top "$d")"
+    if [[ -n "$top" ]]; then
+        cands=("$top")
+    else
+        while :; do
+            cands+=("$d")
+            [[ "$d" == / || "$d" == "$HOME" ]] && break  # home-directory trust is never saved
+            d="$(dirname "$d")"
+        done
+    fi
+    jq -e '[.projects // {} | (.[$ARGS.positional[]] // {}) | .hasTrustDialogAccepted == true] | any' \
+        --args "${cands[@]}" < "$CLAUDE_JSON" >/dev/null 2>&1
+}
+
+todo=()
+printf '%-10s %s\n' STATE FOLDER
+for d in "${folders[@]}"; do
+    if trusted "$d"; then state=trusted; else state=TODO; todo+=("$d"); fi
+    printf '%-10s %s\n' "$state" "${d/#$HOME/\~}"
+done
+consent_done=no
+jq -e '.hasUsedRemoteControl == true' "$CLAUDE_JSON" >/dev/null 2>&1 && consent_done=yes
+case "$consent" in
+    auto) [[ "$consent_done" == yes ]] && consent=no || consent=yes ;;
+esac
+printf '%-10s %s\n' "$([[ $consent == yes ]] && echo TODO || echo skip)" "Remote Control consent (one time per machine)"
+if [[ "$list" == yes ]]; then exit 0; fi
+
+[[ -t 0 && -t 1 ]] || die "needs an interactive terminal (run it yourself, not from an agent)"
+[[ -z "${CLAUDECODE:-}" ]] || die "run it in a plain terminal, not inside a Claude Code session"
+
+n=${#todo[@]} i=0 failed=()
+trap ':' INT  # Ctrl+C ends the claude child, not this walk-through
+if ((n)); then
+    printf '\n%d folder(s) to trust. For each: Claude opens, accept "Yes, I trust this folder", then exit with /exit (or Ctrl+D twice).\n' "$n"
+fi
+for d in "${todo[@]}"; do
+    i=$((i + 1))
+    printf '\n[%d/%d] %s\n' "$i" "$n" "${d/#$HOME/\~}"
+    read -r -p "Enter = open Claude here, s = skip, q = quit: " ans
+    case "$ans" in
+        q|Q) exit 0 ;;
+        s|S) continue ;;
+    esac
+    if trusted "$d"; then echo "  trusted already (inherited from a folder trusted above)"; continue; fi
+    (cd "$d" && env -u RC_DIR claude) || true
+    if trusted "$d"; then echo "  trusted"; else echo "  still not trusted"; failed+=("$d"); fi
+done
+
+if [[ "$consent" == yes ]]; then
+    cat <<EOF
+
+=====================================================================
+ ONE-TIME STEP: Remote Control consent for this machine
+ Claude now runs \`claude remote-control\` in ${CONSENT_DIR/#$HOME/\~}
+ (a folder no role serves). When it asks "Enable Remote Control? (y/n)":
+ answer y, wait until it says it is ready, then press Ctrl+C.
+=====================================================================
+EOF
+    if ! trusted "$CODE_DIR"; then
+        echo "  skipped: ~/code is not trusted yet, run rc-trust-all again after trusting it"
+        failed+=("Remote Control consent")
+    else
+        read -r -p "Enter = start, s = skip: " ans
+        if [[ "$ans" != s && "$ans" != S ]]; then
+            mkdir -p "$CONSENT_DIR"
+            (cd "$CONSENT_DIR" && env -u RC_DIR claude remote-control) || true
+        fi
+    fi
+fi
+
+printf '\n'
+if ((${#failed[@]})); then
+    printf 'Open: %s\n' "${failed[@]/#$HOME/\~}"
+    exit 1
+fi
+echo "Done. Check with: rc-trust-all --list; then rc ls"
