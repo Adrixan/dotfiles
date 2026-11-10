@@ -6,7 +6,13 @@
 # ~/Obsidian/Adrixan/AI/Claude.ai/Projects, the default home of projects). Only the greeter starts at boot.
 # Workspace trust stays a manual step: `cd <folder> && claude` once and accept the dialog.
 # Usage:
-#   rc ls                                   roles with state, sessions, last activity, memory
+#   rc <command> ... --on <host>            runs the command on that host over SSH (schulpc, xps, m11x,
+#                                           agentbox, edu-micro; RC_HOSTS in rc.env); rc up refuses a role
+#                                           that runs on the other workstation (schulpc <-> xps)
+#   rc ls [--running|--short]               roles with state, sessions, last activity, memory (--running:
+#                                           one line per running role; --short: plus stopped roles and RAM)
+#   rc slash <ls|start|stop|restart|logs|menu|h> "<arguments>"
+#                                           the Greeter's slash commands (rc hook greeter-slash runs them)
 #   rc up <role> [--ttl 4h] [--fresh] [--force]  resumes the last session (relay keeps it ~4 h after a stop)
 #   rc down <role> [--wait 10] [--now|--cancel]  stops seconds after each session ran rc handoff-done and
 #                                           ended that turn; after --wait minutes anyway unless a session
@@ -51,9 +57,10 @@
 #                                           restore list and leaves each a note for its restored session
 #   rc sync-confs                           exchanges custom role confs with the other workstation now
 #                                           (every rc command does it first; ~/sync/ai/claude-rc)
-#   rc hook code-session|greeter-start|research-session|turn-done
+#   rc hook code-session|greeter-start|greeter-slash|research-session|turn-done
 #                                           SessionStart hooks of ~/code, the Greeter and research topics;
-#                                           Stop hook (global) that asks for a push after long turns
+#                                           the Greeter's UserPromptExpansion hook; Stop hook (global)
+#                                           that asks for a push after long turns
 # <role> is the role name or its label (case-insensitive).
 # ==============================================================================
 
@@ -159,6 +166,91 @@ remote_role_rc() {  # remote_role_rc <target> <rc args...>: run that user's own 
     local target="$1" args; shift
     args="$(printf '%q ' "$@")"
     ssh -o BatchMode=yes -o ConnectTimeout=20 "$target" "XDG_RUNTIME_DIR=/run/user/\$(id -u) \$HOME/.local/bin/rc $args"
+}
+
+# Hosts (Peter, 2026-11-10): `rc --on <host> <command>` runs rc on that host over its SSH alias, as the
+# user named there (`:user` = sudo -iu from the alias's login). RC_HOSTS in rc.env replaces the list.
+RC_HOSTS_DEFAULT="schulpc=schulpc xps=xps m11x=m11x agentbox=agentbox:travel edu-micro=educator@edu-micro"
+LS_HOSTS_DEFAULT="schulpc xps agentbox edu-micro"  # hosts `rc slash ls` asks (m11x serves no roles)
+WORKSTATIONS_DEFAULT="schulpc xps"  # one machine runs a role at a time: rc up checks the other one
+HOST_TIMEOUT=30  # seconds for one remote call (cloudflared tunnels ignore ConnectTimeout)
+
+local_host() {  # this machine's name in the host list
+    local h; h="$(hostname -s)"; h="${h,,}"
+    case "$h" in xps13) echo xps ;; travel-micro) echo agentbox ;; *) echo "$h" ;; esac
+}
+
+host_names() { local p; for p in ${RC_HOSTS:-$RC_HOSTS_DEFAULT}; do printf '%s ' "${p%%=*}"; done; }
+
+host_spec() {  # host_spec <canonical host>: <ssh target>[:<user>]
+    local p
+    for p in ${RC_HOSTS:-$RC_HOSTS_DEFAULT}; do [[ "${p%%=*}" == "$1" ]] && { echo "${p#*=}"; return 0; }; done
+    return 1
+}
+
+host_canon() {  # host_canon <name>: canonical host name (xps13 -> xps), or die
+    local h="${1,,}"
+    h="${h#@}"
+    case "$h" in
+        xps13) h=xps ;; travel-micro|travel) h=agentbox ;; edu) h=edu-micro ;; here|local) h="$(local_host)" ;;
+    esac
+    host_spec "$h" >/dev/null || die "unknown host '$1' (hosts: $(host_names))"
+    echo "$h"
+}
+
+is_host() { (host_canon "$1") >/dev/null 2>&1; }
+
+host_exec() {  # host_exec <host> <shell command>: run it there as the host's user; stdin passes through
+    local host="$1" spec target user cmd st=0
+    spec="$(host_spec "$host")" || die "unknown host '$host'"
+    target="${spec%%:*}"; user=""
+    [[ "$spec" == *:* ]] && user="${spec#*:}"
+    [[ "$target" =~ ^([a-z_][a-z0-9_-]*@)?[A-Za-z0-9.-]+$ ]] || die "RC_HOSTS: invalid SSH target for $host"
+    [[ -z "$user" || "$user" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "RC_HOSTS: invalid user for $host"
+    if [[ -n "$user" ]]; then
+        cmd="sudo -iu $user env XDG_RUNTIME_DIR=/run/user/\$(id -u $user) $2"
+    else
+        cmd="export XDG_RUNTIME_DIR=/run/user/\$(id -u); $2"
+    fi
+    timeout "$HOST_TIMEOUT" ssh -o BatchMode=yes -o ConnectTimeout=10 "$target" "$cmd" || st=$?
+    case "$st" in
+        255) echo "rc: $host is not reachable (asleep, offline or its SSH tunnel is down)" >&2 ;;
+        124) echo "rc: $host did not answer within ${HOST_TIMEOUT} s (check there with rc ls --on $host)" >&2 ;;
+    esac
+    return "$st"
+}
+
+host_rc() {  # host_rc <host> <rc args...>: rc on that host (this machine: directly)
+    local host="$1" user=""; shift
+    if [[ "$host" == "$(local_host)" ]]; then "$RC_BIN" "$@"; return; fi
+    [[ "$(host_spec "$host")" == *:* ]] && user="$(host_spec "$host")" && user="${user#*:}"
+    if [[ -n "$user" ]]; then
+        host_exec "$host" "/home/$user/.local/bin/rc $(printf '%q ' "$@")"
+    else
+        host_exec "$host" "\$HOME/.local/bin/rc $(printf '%q ' "$@")"
+    fi
+}
+
+host_unit_state() {  # host_unit_state <host> <role>: the role's unit state there, or "unreachable"
+    local out st=0
+    if [[ "$1" == "$(local_host)" ]]; then systemctl --user is-active "$(unit "$2")" 2>/dev/null || true; return 0; fi
+    out="$(host_exec "$1" "systemctl --user is-active $(printf '%q' "$(unit "$2")")" </dev/null 2>/dev/null)" || st=$?
+    case "$st" in 124|255) echo unreachable ;; *) echo "${out:-unknown}" ;; esac
+    return 0
+}
+
+host_running() {  # host_running <host>: role names whose server runs there (version-independent of its rc)
+    local cmd="systemctl --user list-units --type=service --state=active,activating --plain --no-legend 'claude-remote-control@*'"
+    if [[ "$1" == "$(local_host)" ]]; then bash -c "$cmd"; else host_exec "$1" "$cmd" </dev/null; fi \
+        | sed -n 's/^claude-remote-control@\([^ ]*\)\.service .*/\1/p'
+}
+
+peer_host() {  # the other workstation, when this machine is one of them
+    local me h list="${RC_WORKSTATIONS:-$WORKSTATIONS_DEFAULT}"
+    me="$(local_host)"
+    [[ " $list " == *" $me "* ]] || return 0
+    for h in $list; do [[ "$h" != "$me" ]] && { echo "$h"; return 0; }; done
+    return 0
 }
 
 usage() {
@@ -330,8 +422,43 @@ stop_now() {
     rm -rf -- "${STOPPING_DIR:?}/${role}" "${DONE_DIR:?}/${role}"
 }
 
+ls_running() {  # one line per running role except the Greeter: label, role, sessions, last activity, MB, pending stop
+    local f role idle stop label n=0
+    for f in "${CONF_DIR}"/*.conf; do
+        [[ -e "$f" ]] || continue
+        role="$(basename "$f" .conf)"
+        [[ "$role" == greeter ]] && continue
+        systemctl --user is-active --quiet "$(unit "$role")" || continue
+        idle="$(last_active_min "$role")"; stop="$(stop_pending "$role")"
+        label="$(conf_get "$role" RC_NAME)"
+        printf '  %s (%s): %s sess%s, %s MB%s\n' "${label:-$role}" "$role" "$(sessions "$role")" \
+            "${idle:+, ${idle} min ago}" "$(memory_mb "$role")" "${stop:+, STOPPING by $(date -d "@$stop" +%H:%M)}"
+        n=$((n + 1))
+    done
+    [[ "$n" -gt 0 ]] || echo "  nothing running"
+    return 0
+}
+
+ls_stopped() {  # one line: stopped fixed and custom roles, most recent first (code, trip, research, project roles left out)
+    local f role idle
+    for f in "${CONF_DIR}"/*.conf; do
+        role="$(basename "$f" .conf)"
+        [[ "$role" == greeter || "$role" == code-* || "$role" == trip-* || "$role" == research-* || "$role" == project-* ]] && continue
+        remote_role_target "$role" >/dev/null && continue
+        systemctl --user is-active --quiet "$(unit "$role")" && continue
+        idle="$(last_active_min "$role")"
+        printf '%s\t%s\n' "${idle:-999999999}" "$role"
+    done | sort -n | cut -f2 | paste -sd' ' | sed 's/ /, /g; s/^/  stopped: /'
+}
+
 cmd_ls() {
     local f role state sess idle mem
+    case "${1:-}" in
+        --running) ls_running; return ;;
+        --short) ls_running; ls_stopped; echo "  RAM available: $(available_mb) MB"; return ;;
+        "") ;;
+        *) usage ;;
+    esac
     printf '%-10s %-15s %-9s %-4s %-8s %-6s %-16s %s\n' ROLE LABEL STATE SESS LAST_ACT MEM_MB PLUGINS DESCRIPTION
     for f in "${CONF_DIR}"/*.conf; do
         role="$(basename "$f" .conf)"
@@ -399,6 +526,7 @@ cmd_up() {
         echo "$role is already running ($(sessions "$role") sessions)"
         return
     fi
+    peer_check "$role"
     dir="$(conf_get "$role" RC_DIR)"
     [[ -d "$dir" ]] || die "folder missing: $dir"
     is_trusted "$dir" || die "$dir is not trusted: run 'cd \"$dir\" && claude' once in a terminal and accept the dialog"
@@ -416,6 +544,19 @@ cmd_up() {
         echo "auto-stop in $ttl"
     fi
     echo "started $role: open the session \"$(conf_get "$role" RC_NAME)\" in the Claude app (appears within about 30 s)"
+}
+
+peer_check() {  # one machine runs a role at a time (Peter, 2026-11-04): refuse while the other workstation runs it
+    local peer state
+    [[ "${RC_PEER_CHECK:-yes}" != no ]] || return 0
+    peer="$(peer_host)"
+    [[ -n "$peer" ]] || return 0
+    state="$(host_unit_state "$peer" "$1")"
+    case "$state" in
+        active|activating|reloading|deactivating)
+            die "$1 runs on $peer ($state): one machine runs a role at a time; stop it there first (rc down $1 --on $peer)" ;;
+        unreachable) echo "note: $peer is not reachable, so it was not checked whether $1 runs there" ;;
+    esac
 }
 
 cmd_down() {  # stop after the handoff (bounded wait) or at once; idle notices are not needed
@@ -1072,7 +1213,8 @@ cmd_restore() {  # start the roles that ran before a reboot; prints one summary 
         [[ "$role" == trip-* ]] && remote_trips && { rm -f -- "$f"; continue; }  # runs on RC_TRIP_HOST
         remote_role_target "$role" >/dev/null && { rm -f -- "$f"; continue; }  # runs on its own host
         systemctl --user is-active --quiet "$(unit "$role")" && continue
-        if out="$( (cmd_up "$role") 2>&1 )"; then
+        # The roles ran here before the reboot; no peer check (it would delay the Greeter's start per role)
+        if out="$( (RC_PEER_CHECK=no; cmd_up "$role") 2>&1 )"; then
             ok+=("$(conf_get "$role" RC_NAME)")
         else
             failed+=("$(conf_get "$role" RC_NAME) (${out##*rc: })")
@@ -1201,12 +1343,14 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
         research-session) hook_research_session; return 0 ;;
         trip-session) hook_trip_session; return 0 ;;
         reboot-note) hook_reboot_note; return 0 ;;
+        greeter-slash) hook_greeter_slash; return 0 ;;
     esac
-    if [[ "${1:-}" == greeter-start ]]; then
+    if [[ "${1:-}" == greeter-start ]]; then  # no start menu (Peter, 2026-11-10): a turn only to report a restore
         local restored
         cat >/dev/null
         restored="$(cmd_restore | tr '\n' ' ')"
-        jq -n --arg m "[greeter-start] Show the role menu.${restored:+ Put this in the status line: ${restored% }}" \
+        [[ -n "$restored" ]] || return 0
+        jq -n --arg m "[greeter-start] Reply with exactly this line, nothing else: ${restored% } (/h lists the commands)" \
             '{hookSpecificOutput: {hookEventName: "SessionStart", initialUserMessage: $m}}'
         return 0
     fi
@@ -1247,6 +1391,262 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
     if [[ -n "$note" ]]; then [[ -n "$message" ]] && message+=$'\n\n'; message+="$note"; fi
     jq -n --arg c "$context" --arg m "$message" \
         '{hookSpecificOutput: ({hookEventName: "SessionStart", additionalContext: $c} + (if $m == "" then {} else {initialUserMessage: $m} end))}'
+}
+
+# Greeter slash commands (Peter, 2026-11-10): the Greeter's UserPromptExpansion hook (rc hook greeter-slash)
+# runs /ls /start /stop /restart /logs /menu /h here and shows the output without a model turn. Output with
+# HANDOFF or BRIEF lines (sessions to message) goes to the model instead, and so does every output with
+# RC_GREETER_FAST=no in rc.env (if the app does not show hook messages).
+SLASH_CMDS="ls start stop restart logs menu h"
+SLASH_MODEL_RE='^(HANDOFF|BRIEF) |brief not queued'
+SLASH_HELP='Hosts: schulpc (default), xps, m11x, agentbox, edu-micro; add "on xps" or "@xps".
+/ls [host]     running roles on all hosts (one host: also its stopped roles)
+/start <what> [on host] [for 3h] [fresh] [force]
+  what: <role> | code <project> | code new <name> | code own <project>
+        | research <topic> | trip <place> | project <name>
+  ": <text>" at the end hands that text over as a brief
+/stop <role...|all> [now] [on host]   handoff first, unless "now"
+/restart <role> [on host]
+/logs <role> [lines] [on host]
+/menu          roles, trips, research topics, projects, RAM
+Anything typed in words goes to the right session.'
+S_HOST=""; S_WORDS=()
+
+slash_words() {  # slash_words anywhere|end <words...>: S_WORDS without "on <host>" or "@<host>", S_HOST
+    local mode="$1" i n; shift
+    local -a w=("$@")
+    S_HOST=""; S_WORDS=(); n=${#w[@]}
+    for (( i = 0; i < n; i++ )); do
+        if [[ "${w[i],,}" == on ]] && (( i + 1 < n )) && is_host "${w[i+1]}" && [[ "$mode" == anywhere || $(( i + 2 )) -eq $n ]]; then
+            S_HOST="$(host_canon "${w[i+1]}")"; i=$(( i + 1 )); continue
+        fi
+        if [[ "${w[i]}" == @* ]] && is_host "${w[i]}" && [[ "$mode" == anywhere || $(( i + 1 )) -eq $n ]]; then
+            S_HOST="$(host_canon "${w[i]}")"; continue
+        fi
+        S_WORDS+=("${w[i]}")
+    done
+}
+
+slash_role() {  # slash_role <words...>: role for a name, label or one of Peter's words; unknown names pass through
+    local want="${*,,}"
+    case "$want" in
+        teacher|lehrer|unterricht) want=teaching ;; dissertation|diss|doktorat) want=phd ;;
+        prof|aufner|"prof aufner"|"prof. aufner") want=educator ;; "deep research") want=research ;;
+        "travel greeter") want=travel-greeter ;;
+    esac
+    (resolve "$want") 2>/dev/null || echo "$want"
+}
+
+slash_roles() {  # slash_roles <words...>: one role per line (a multi-word label first, else one per word)
+    local w r
+    r="$(slash_role "$@")"
+    if [[ $# -le 1 || -f "${CONF_DIR}/${r}.conf" || "$r" == travel-greeter ]]; then echo "$r"; return 0; fi
+    for w in "$@"; do slash_role "$w"; done
+}
+
+slash_where() {  # slash_where <role>: host to act on: here (rc forwards trips and remote roles), else where it runs
+    local peer
+    [[ "$1" == travel-greeter ]] && { echo agentbox; return 0; }
+    if [[ "$1" == trip-* ]] || remote_role_target "$1" >/dev/null || systemctl --user is-active --quiet "$(unit "$1")"; then
+        local_host; return 0
+    fi
+    peer="$(peer_host)"
+    if [[ -n "$peer" ]]; then
+        case "$(host_unit_state "$peer" "$1")" in active|activating|reloading) echo "$peer"; return 0 ;; esac
+    fi
+    local_host
+}
+
+slash_label() { if [[ -f "${CONF_DIR}/$1.conf" ]]; then conf_get "$1" RC_NAME; else echo "$1"; fi; }
+
+slash_compat() {  # an older rc on the other host prints the full rc ls table: keep its running roles
+    awk 'NR == 1 && /^ROLE +LABEL/ { old = 1; next }
+        !old { print; next }
+        /^\* starts at boot/ || NF == 0 { next }
+        { for (i = 2; i <= NF; i++) if ($i ~ /^(active|activating|stopping)\*?$/) {
+              if ($1 != "greeter") { l = (i > 2 ? $2 : $1); for (j = 3; j < i; j++) l = l " " $j; printf "  %s (%s): %s\n", l, $1, $i; n++ }
+              break } }
+        END { if (old && !n) print "  nothing running" }'
+}
+
+slash_ls() {
+    local h tmp i=0
+    local -a w hosts
+    read -ra w <<< "$1"
+    if [[ ${#w[@]} -gt 0 ]]; then
+        h="$(host_canon "${w[-1]}")"
+        echo "${h}:"; { host_rc "$h" ls --short </dev/null 2>&1 || true; } | slash_compat
+        return 0
+    fi
+    read -ra hosts <<< "${RC_LS_HOSTS:-$LS_HOSTS_DEFAULT}"
+    tmp="$(mktemp -d)"
+    for h in "${hosts[@]}"; do
+        { host_rc "$h" ls --running </dev/null > "$tmp/$i" 2>&1 || true; } &
+        i=$(( i + 1 ))
+    done
+    wait
+    for (( i = 0; i < ${#hosts[@]}; i++ )); do echo "${hosts[i]}:"; slash_compat < "$tmp/$i"; done
+    rm -rf -- "$tmp"
+    echo "RAM here: $(available_mb) MB. /h lists the commands."
+}
+
+slash_start() {
+    local line="$1" brief="" kind host w i n out role
+    local -a words opts=() rest=() args=() roles=()
+    read -ra words <<< "$line"
+    kind="${words[0]:-}"; kind="${kind,,}"
+    if [[ -z "$kind" ]]; then
+        echo "Start what? /start <role> | code <project> | research <topic> | trip <place> | project <name>"
+        ls_stopped
+        echo "  recent code: $(project_rows | head -4 | cut -f2 | paste -sd' ' | sed 's/ /, /g')"
+        return 0
+    fi
+    if [[ "$kind" != research && "$line" == *": "* ]]; then
+        brief="${line#*: }"; line="${line%%: *}"; read -ra words <<< "$line"
+    fi
+    if [[ "$kind" == research ]]; then slash_words end "${words[@]:1}"; else slash_words anywhere "${words[@]:1}"; fi
+    n=${#S_WORDS[@]}
+    for (( i = 0; i < n; i++ )); do
+        w="${S_WORDS[i],,}"
+        case "$w" in
+            --fresh|--force) opts+=("$w"); continue ;;
+            fresh|force) [[ "$kind" != research ]] && { opts+=("--$w"); continue; } ;;
+            for|--ttl)
+                if (( i + 1 < n )) && [[ "${S_WORDS[i+1],,}" =~ ^[0-9]{1,3}(m|min|h|d)$ ]]; then
+                    opts+=(--ttl "${S_WORDS[i+1],,}"); i=$(( i + 1 )); continue
+                fi ;;
+            *) [[ "$kind" != research && "$w" =~ ^[0-9]{1,3}(m|min|h|d)$ ]] && { opts+=(--ttl "$w"); continue; } ;;
+        esac
+        rest+=("${S_WORDS[i]}")
+    done
+    host="${S_HOST:-$(local_host)}"
+    w="${rest[0]:-}"
+    case "$kind" in
+        code)
+            case "${w,,}" in
+                "") echo "Which project? /start code <project>"; project_rows | head -6 | cut -f2 | sed 's/^/  /'; return 0 ;;
+                new|own) [[ ${#rest[@]} -eq 2 ]] || { echo "usage: /start code ${w,,} <name>"; return 0; }
+                         args=(code "--${w,,}" "${rest[1]}") ;;
+                *) [[ ${#rest[@]} -eq 1 ]] || { echo "One project name, please; a brief goes after \": \" (/start code <project>: <text>)"; return 0; }
+                   args=(code "${rest[0]}") ;;
+            esac ;;
+        research)
+            [[ ${#rest[@]} -gt 0 ]] || { echo "Resume one with /start research <slug>, or give a new topic:"
+                { host_rc "$host" researches </dev/null 2>&1 || true; } | awk 'NR > 1 { t = ""; for (i = 5; i <= NF; i++) t = t " " $i; printf "  %s (%s, %s):%s\n", $1, $2, $4, substr(t, 1, 60) }'; return 0; }
+            w="${rest[*]}"; w="${w#[\"\']}"; w="${w%[\"\']}"
+            args=(research "$w") ;;
+        trip)
+            [[ ${#rest[@]} -gt 0 ]] || { host_rc "$host" trips </dev/null 2>&1; return 0; }
+            args=(trip "${rest[*]}") ;;
+        project)
+            [[ ${#rest[@]} -gt 0 ]] || { host_rc "$host" project --list </dev/null 2>&1; return 0; }
+            args=(project "${rest[*]}") ;;
+        *)
+            mapfile -t roles < <(slash_roles "${words[0]}" "${rest[@]}")
+            for role in "${roles[@]}"; do
+                [[ "$role" == greeter ]] && { echo "greeter: this is the Greeter, it already runs"; continue; }
+                out="$(host_rc "$host" up "$role" "${opts[@]}" </dev/null 2>&1)" || true
+                echo "$out"
+                [[ -n "$brief" ]] && echo "BRIEF $(slash_label "$role") | $role | $host"
+            done
+            return 0 ;;
+    esac
+    # code and trip queue a brief for the new session; research appends it to the topic start; project takes none
+    if [[ -n "$brief" && "$kind" != project ]]; then
+        printf '%s\n' "$brief" | host_rc "$host" "${args[@]}" "${opts[@]}" --brief - 2>&1 || true
+    else
+        host_rc "$host" "${args[@]}" "${opts[@]}" </dev/null 2>&1 || true
+        [[ -n "$brief" ]] && echo "BRIEF Project: ${rest[*]} | project | $host"
+    fi
+    return 0
+}
+
+slash_stop() {
+    local w r host out
+    local -a words now=() names=() roles=()
+    read -ra words <<< "$1"
+    slash_words anywhere "${words[@]}"
+    for w in "${S_WORDS[@]}"; do
+        case "${w,,}" in now|--now|force|--force) now=(--now) ;; *) names+=("$w") ;; esac
+    done
+    if [[ ${#names[@]} -eq 0 ]]; then
+        echo "Stop what? /stop <role...|all> [now] [on host]. Running here:"; ls_running; return 0
+    fi
+    if [[ "${names[*],,}" == all ]]; then
+        host="${S_HOST:-$(local_host)}"
+        mapfile -t roles < <({ host_running "$host" 2>/dev/null || true; } | grep -vxE 'greeter|travel-greeter' || true)
+        [[ ${#roles[@]} -gt 0 ]] || { echo "${host}: nothing running (the Greeters stay)"; return 0; }
+    else
+        mapfile -t roles < <(slash_roles "${names[@]}")
+    fi
+    for r in "${roles[@]}"; do
+        [[ "$r" == greeter ]] && { echo "greeter: not from here (it would end this session); say it in words if you mean it"; continue; }
+        host="${S_HOST:-$(slash_where "$r")}"
+        out="$(host_rc "$host" down "$r" "${now[@]}" </dev/null 2>&1)" || true
+        if [[ "$out" == stopping* ]]; then
+            echo "HANDOFF $(slash_label "$r") | $r | $host"
+        else
+            echo "${r} (${host}): ${out}"
+        fi
+    done
+    return 0
+}
+
+slash_restart() {
+    local r host
+    local -a words
+    read -ra words <<< "$1"
+    slash_words anywhere "${words[@]}"
+    [[ ${#S_WORDS[@]} -gt 0 ]] || { echo "Restart what? /restart <role> [on host]"; return 0; }
+    r="$(slash_role "${S_WORDS[@]}")"
+    [[ "$r" == greeter ]] && { echo "greeter: not from here (it would end this turn mid-way); say it in words if you mean it"; return 0; }
+    host="${S_HOST:-$(slash_where "$r")}"
+    echo "${r} (${host}): $(host_rc "$host" restart "$r" </dev/null 2>&1 || true)"
+}
+
+slash_logs() {
+    local r host lines=15
+    local -a words
+    read -ra words <<< "$1"
+    slash_words anywhere "${words[@]}"
+    [[ ${#S_WORDS[@]} -gt 0 ]] || { echo "Logs of what? /logs <role> [lines] [on host]"; return 0; }
+    if [[ ${#S_WORDS[@]} -gt 1 && "${S_WORDS[-1]}" =~ ^[0-9]{1,3}$ ]]; then lines="${S_WORDS[-1]}"; unset 'S_WORDS[-1]'; fi
+    [[ "$lines" -le 200 ]] || lines=200
+    r="$(slash_role "${S_WORDS[@]}")"
+    host="${S_HOST:-$(slash_where "$r")}"
+    echo "${r} (${host}), last ${lines} lines:"
+    { host_rc "$host" logs "$r" "$lines" </dev/null 2>&1 || true; } \
+        | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T([0-9:]{8})[^ ]* [^ ]+ [^:]+: /\1 /'
+}
+
+cmd_slash() {  # cmd_slash <name> [argument line]: one Greeter slash command
+    local name="${1:-h}" line="${2:-}"
+    case "$name" in
+        ls) slash_ls "$line" ;;
+        start) slash_start "$line" ;;
+        stop) slash_stop "$line" ;;
+        restart) slash_restart "$line" ;;
+        logs) slash_logs "$line" ;;
+        menu) cmd_menu ;;
+        h|help) echo "$SLASH_HELP" ;;
+        *) echo "$SLASH_HELP"; return 2 ;;
+    esac
+}
+
+hook_greeter_slash() {  # UserPromptExpansion hook of the Greeter: its slash commands without a model turn
+    local input name args out
+    input="$(cat)"
+    name="$(jq -r '.command_name // empty' <<< "$input")"
+    args="$(jq -r '.command_args // empty' <<< "$input")"
+    [[ " $SLASH_CMDS " == *" $name "* ]] || return 0
+    out="$( (cmd_slash "$name" "$args") 2>&1 )" || true
+    if [[ "${RC_GREETER_FAST:-yes}" == no ]] || grep -qE "$SLASH_MODEL_RE" <<< "$out"; then
+        jq -n --arg c "[rc /${name}] already ran; its output:"$'\n'"${out}" \
+            '{hookSpecificOutput: {hookEventName: "UserPromptExpansion", additionalContext: $c}}'
+    else
+        jq -n --arg r "$out" \
+            '{decision: "block", reason: $r, hookSpecificOutput: {hookEventName: "UserPromptExpansion", suppressOriginalPrompt: true}}'
+    fi
 }
 
 cmd_menu() {  # one listing for the Greeter's menu
@@ -1380,7 +1780,19 @@ cmd_logs() {
 }
 
 [[ "${1:-}" == hook ]] && { shift; cmd_hook "$@"; exit 0; }  # also runs on machines without roles
-[[ -d "$CONF_DIR" ]] || die "no role configs in $CONF_DIR"
+ON_HOST=""; MAIN_ARGS=()
+while [[ $# -gt 0 ]]; do  # --on <host> anywhere: the command runs on that host (Peter, 2026-11-10)
+    if [[ "$1" == --on ]]; then ON_HOST="${2:?--on needs a host ($(host_names))}"; shift 2; else MAIN_ARGS+=("$1"); shift; fi
+done
+set -- "${MAIN_ARGS[@]}"
+if [[ -n "$ON_HOST" ]]; then
+    ON_HOST="$(host_canon "$ON_HOST")"
+    if [[ "$ON_HOST" != "$(local_host)" ]]; then
+        case "${1:-ls}" in stop-wait|handoff-done|slash|sync-confs|restore|quiet|prepare-reboot) die "rc ${1}: only on this machine" ;; esac
+        host_rc "$ON_HOST" "$@"; exit $?
+    fi
+fi
+[[ -d "$CONF_DIR" ]] || die "no role configs in $CONF_DIR on $(local_host)"
 sync_confs  # custom roles made on the other workstation become available here
 if remote_trips; then  # trip roles run on RC_TRIP_HOST: forward, never start them here
     case "${1:-}" in
@@ -1408,7 +1820,8 @@ if [[ -n "${RC_REMOTE_ROLES:-}" && -n "${2:-}" ]]; then  # roles that live on an
     esac
 fi
 case "${1:-ls}" in
-    ls|list|status) cmd_ls ;;
+    ls|list|status) [[ $# -gt 0 ]] && shift; cmd_ls "$@" ;;
+    slash) shift; cmd_slash "$@" ;;
     up|start) shift; cmd_up "$@" ;;
     down|stop) shift; cmd_down "$@" ;;
     restart) shift; cmd_restart "$@" ;;

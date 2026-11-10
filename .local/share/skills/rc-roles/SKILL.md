@@ -1,6 +1,6 @@
 ---
 name: rc-roles
-description: Start, stop, list and create Claude Code remote-control roles on schulpc (code, teaching, educator, research, phd, greeter, one role per trip, one role per code project, and custom roles) with the `rc` command. Use when Peter greets the Greeter session, asks which roles are running, wants a role started or stopped ("start teacher for 3 hours", "stop everything idle", "fresh code session"), wants to plan a trip or resume one ("plan Berlin", "back to Prague"), wants to work on or create a code project, wants a deep research on a topic ("research <topic>") or to resume one, or wants a new custom role.
+description: Start, stop, list and create Claude Code remote-control roles on schulpc (code, teaching, educator, research, phd, greeter, one role per trip, one role per code project, and custom roles) with the `rc` command. Use when Peter asks which roles are running (on any host), wants a role started or stopped ("start teacher for 3 hours", "stop everything idle", "fresh code session"), wants to plan a trip or resume one ("plan Berlin", "back to Prague"), wants to work on or create a code project, wants a deep research on a topic ("research <topic>") or to resume one, or wants a new custom role.
 ---
 
 # rc-roles
@@ -11,7 +11,17 @@ the work; never call `systemctl` on these units directly, because `rc` adds the 
 busy-session guards.
 
 ## Commands
-- `rc ls`: state, sessions, minutes since the last session activity, memory, plugins, description.
+- `rc ls [--running|--short]`: state, sessions, minutes since the last session activity, memory, plugins,
+  description; `--running` one line per running role, `--short` plus the stopped roles and RAM.
+- Hosts (Peter, 2026-11-10): `--on <host>` anywhere runs the command on that host over its SSH alias
+  (`rc up teaching --on xps`, `rc ls --short --on agentbox`): schulpc, xps (= xps13), m11x (serves no
+  roles), agentbox (as `travel`), edu-micro (as `educator`); `RC_HOSTS` in `rc.env` replaces the list. An
+  unreachable host (xps asleep) gives a clear error and changes nothing there.
+- Greeter slash commands: `rc slash <ls|start|stop|restart|logs|menu|h> "<arguments>"` backs `/ls`,
+  `/start`, `/stop`, `/restart`, `/logs`, `/menu` and `/h` in the Greeter (grammar: `rc slash h`); its
+  UserPromptExpansion hook `rc hook greeter-slash` shows the output without a model turn and hands only
+  `HANDOFF`/`BRIEF` lines (sessions to message) to the model. `RC_GREETER_FAST=no` in `rc.env` hands every
+  output to the model, for clients that do not show hook messages.
 - `rc up <role> [--ttl 3h] [--fresh] [--force]`: resumes the role's previous sessions by default (the relay
   allows that for about 4 hours after the stop; later a new session starts and reads
   `.agents/session-handoff.md`); `--ttl` stops the role automatically; `--fresh` starts a new session on
@@ -41,7 +51,10 @@ busy-session guards.
 - Two workstations (schulpc primary, xps13 standby, 2026-11-04): custom role confs travel through the
   Syncthing folder `~/sync/ai/claude-rc` (every rc command exchanges them first; `rc sync-confs` does it
   now), `rc rm` removes a role on both. `RC_SHARED_EXCLUDE` in a machine's `rc.env` keeps roles local
-  (`code-ptsd` on schulpc). Run a role on one machine at a time: check `rc ls` on the other before `rc up`.
+  (`code-ptsd` on schulpc). A role runs on one machine at a time: `rc up` (also through `rc code`,
+  `rc research`, `rc project`) refuses while the other workstation runs it and names the stop command
+  (`rc down <role> --on <host>`); an unreachable peer only gives a note. `rc restore` skips the check.
+  xps13 has workspace trust only for the folders Peter accepted there (`cd <folder> && claude` once).
 - Trips, several in parallel: `rc trip <destination> [up options]` creates the role `trip-<slug>` on first
   use (folder `~/Obsidian/Adrixan/Travel/Trips/<slug>` with the trip brief and the research plugin)
   and starts or resumes it later; `rc trips` lists them. Each trip keeps `trip.md` and its handoff in its
@@ -86,7 +99,7 @@ busy-session guards.
   `Research/AGENTS.md`).
 - `rc menu`: running roles (with pending stops), stopped fixed and custom roles, trips, research topics,
   vault projects, recent code projects and free RAM in one
-  listing (the Greeter's menu).
+  listing (`/menu` in the Greeter).
 - Roles return after a reboot: `rc up` marks a role as wanted, `rc down`, `rc rm` and an expired `--ttl`
   unmark it (state in `~/.local/state/claude-rc/wanted/`). The Greeter's SessionStart hook
   (`rc hook greeter-start`) runs `rc restore` first, which starts every wanted role that is not running,
@@ -109,7 +122,7 @@ busy-session guards.
   found with `ListAgents`. Own repo roles (`rc code --own`) have no rc start hook either: SendMessage once
   the session is listed (about 30 s after `rc up`).
 - Other machines: `rc trip` forwards to the agentbox (`RC_TRIP_HOST`), `rc up|down|restart|logs educator`
-  to edu-micro (`RC_REMOTE_ROLES`); a trip brief travels on stdin over SSH. `rc up` takes no brief, so the
+  to edu-micro (`RC_REMOTE_ROLES`), and any command takes `--on <host>`; a brief travels on stdin over SSH. `rc up` takes no brief, so the
   educator gets its context by SendMessage once its session is listed. `ListAgents` in a Remote Control
   session also lists the Remote Control sessions of Peter's account on the other machines (kind
   "Remote Control", label = role label, e.g. "Trip <destination>", "educator", "Travel Greeter"), and
@@ -125,8 +138,8 @@ busy-session guards.
 
 ## How to act
 - On a greeting or "what's running": run `rc ls` and answer with a short menu: running roles first (label,
-  sessions, last activity, memory), then the stopped roles in one line, then free RAM. The Greeter
-  follows the menu in its own `AGENTS.md` instead.
+  sessions, last activity, memory), then the stopped roles in one line, then free RAM. The Greeter shows
+  no menu since 2026-11-10: Peter types its slash commands (its own `AGENTS.md`).
 - Map Peter's words to role names, then check the name exists in the current `rc ls` (roles, trips and
   code projects come and go): teacher, Lehrer → teaching; coding, dev → `rc code <project>`; trip,
   Reise, travel planner → `rc trip <destination>` (the general travel role is not offered); Prof.
