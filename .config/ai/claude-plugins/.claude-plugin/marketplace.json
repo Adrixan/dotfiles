@@ -18,7 +18,12 @@
     {
       "name": "workstation-research",
       "source": "./plugins/workstation-research",
-      "description": "Research and law MCP servers (arXiv, Zotero, OpenAlex, Phở, Obsidian search, Wikipedia, YouTube, RIS, EUR-Lex, NASA)"
+      "description": "Research and law MCP servers (arXiv, Zotero, OpenAlex, Ph\u1edf, Obsidian search, Wikipedia, YouTube, RIS, EUR-Lex, NASA)"
+    },
+    {
+      "name": "workstation-web",
+      "source": "./plugins/workstation-web",
+      "description": "Web development: Chrome DevTools MCP plus the Modern Web Guidance and Chrome DevTools skills; on only in the general Code role and web projects"
     }
   ]
 }

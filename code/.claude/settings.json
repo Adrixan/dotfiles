@@ -1,4 +1,7 @@
 {
+  "enabledPlugins": {
+    "workstation-web@workstation": true
+  },
   "hooks": {
     "SessionStart": [
       {

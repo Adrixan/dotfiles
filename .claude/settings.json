@@ -51,7 +51,8 @@
     "workstation-mcp@workstation": true,
     "workstation-dev@workstation": true,
     "workstation-research@workstation": true,
-    "cloudflare@cloudflare": true
+    "cloudflare@cloudflare": true,
+    "workstation-web@workstation": false
   },
   "extraKnownMarketplaces": {
     "workstation": {

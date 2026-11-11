@@ -38,6 +38,18 @@
     },
 {% else %}
     "memory": {"serverUrl": "http://127.0.0.1:8790/servers/memory/mcp", "disabled": false},
+    "chrome-devtools": {
+      "command": "/usr/local/bin/chrome-devtools-mcp",
+      "args": [
+        "--executable-path",
+        "/usr/local/libexec/mcp-chromium-sandboxed",
+        "--headless",
+        "--isolated",
+        "--no-usage-statistics",
+        "--no-performance-crux"
+      ],
+      "disabled": false
+    },
 {% endif %}
 {% if env.TERMUX_VERSION != "" %}
     "fetch": {

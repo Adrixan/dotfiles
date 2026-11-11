@@ -100,11 +100,12 @@ STOP_TURN_MARGIN=30 # in_turn: the transcript may change this long after a turn 
 STOP_QUIET_SEC=60   # rc down: the session must have been quiet this long after its handoff
 NOTIFY_MIN_SEC=60   # turn-done hook: only turns at least this long end with a push
 CUSTOM_MARKER="# Created by rc new"
-OPTIONAL_PLUGINS=(dev research)  # travel retired 2026-11-04: trips run on the agentbox with their own MCP setup
+OPTIONAL_PLUGINS=(dev research web)  # travel retired 2026-11-04: trips run on the agentbox with their own MCP setup
 # One server per folder (a second `claude remote-control` in a folder is refused) and a repository in
 # ~/code is untrusted on its own, so each project runs in a helper folder ~/code/.rc/<project>: not a
 # git repository, so it inherits the ~/code trust; auto mode edits the project outside that folder
 SLOTS_DIR="${CODE_DIR}/.rc"
+WEB_PROJECTS="${HOME}/sync/ai/web-projects.txt"  # web projects: workstation-web plugin, weekly web-modernize run
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-rc"
 REBOOT_NOTES_DIR="${STATE_DIR}/reboot-notes"  # <dir_key of RC_DIR>: date of an unattended update reboot
 REBOOT_NOTE_MAX_MIN=1440   # a note older than a day is stale
@@ -1086,11 +1087,20 @@ remote_session_id() {  # cse_<id> of the `claude --sdk-url` process this hook ru
     return 0
 }
 
-make_slot() {  # helper folder of a project role: only the focus hook, written by rc
+is_web_project() {  # listed in the shared web-project list (Modern Web Guidance, Chrome DevTools MCP)
+    [[ -r "$WEB_PROJECTS" ]] && grep -v '^[[:space:]]*#' "$WEB_PROJECTS" | awk '{print $1}' | grep -qxF -- "$1"
+}
+
+make_slot() {  # helper folder of a project role: the focus hook, plus the web plugin for a web project
+    local web=false
+    is_web_project "$(basename "$1")" && web=true
     mkdir -p "$1/.claude"
-    jq -n --arg c "\"\$HOME/.local/bin/rc\" hook code-session" \
-        '{hooks: {SessionStart: [{matcher: "startup|resume|compact", hooks: [{type: "command", command: $c}]}]}}' \
-        > "$1/.claude/settings.json"
+    jq -n --arg c "\"\$HOME/.local/bin/rc\" hook code-session" --argjson w "$web" \
+        '{enabledPlugins: {"workstation-web@workstation": $w},
+          hooks: {SessionStart: [{matcher: "startup|resume|compact", hooks: [{type: "command", command: $c}]}]}}' \
+        > "$1/.claude/settings.json.tmp"
+    cmp -s "$1/.claude/settings.json.tmp" "$1/.claude/settings.json" && rm -f -- "$1/.claude/settings.json.tmp" \
+        || mv -- "$1/.claude/settings.json.tmp" "$1/.claude/settings.json"
 }
 
 cmd_code() {
@@ -1115,6 +1125,7 @@ cmd_code() {
     role="$(code_role "$project")"
     if [[ -e "${CONF_DIR}/${role}.conf" ]]; then  # existing project role (helper folder or --own)
         [[ "$own" == yes && "$(conf_get "$role" RC_DIR)" != "$dir" ]] && die "$role runs from its helper folder: rc rm $role first"
+        [[ "$(conf_get "$role" RC_DIR)" == "${SLOTS_DIR}/${project}" ]] && make_slot "${SLOTS_DIR}/${project}"  # web list may have changed
         code_brief "$role"
         cmd_up "$role" "$@"
         return
