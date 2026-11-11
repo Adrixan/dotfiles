@@ -2,7 +2,7 @@
   "$schema": "https://opencode.ai/config.json",
   "update": "auto",
   "instructions": ["~/sync/ai/WORKSTATION.md", "~/storage/shared/sync/ai/WORKSTATION.md"],
-  "skills": { "paths": ["{{ env.HOME }}/.claude/plugins/marketplaces/claude-plugins-official/plugins/frontend-design/skills", "{{ env.HOME }}/.claude/plugins/marketplaces/cloudflare/skills"] },
+  "skills": { "paths": ["{{ env.HOME }}/.claude/plugins/marketplaces/claude-plugins-official/plugins/frontend-design/skills", "{{ env.HOME }}/.claude/plugins/marketplaces/cloudflare/skills", "{{ env.HOME }}/.config/ai/claude-plugins/plugins/workstation-web/skills"] },
   "providers": {
     "anthropic": {
       "headers": {
@@ -78,6 +78,18 @@
       },
 {% else %}
       "memory": {"type": "remote", "url": "http://127.0.0.1:8790/servers/memory/mcp", "oauth": false},
+      "chrome-devtools": {
+        "type": "local",
+        "command": [
+          "/usr/local/bin/chrome-devtools-mcp",
+          "--executable-path",
+          "/usr/local/libexec/mcp-chromium-sandboxed",
+          "--headless",
+          "--isolated",
+          "--no-usage-statistics",
+          "--no-performance-crux"
+        ]
+      },
 {% endif %}
 {% if env.TERMUX_VERSION != "" %}
       "fetch": {

@@ -1,0 +1,8 @@
+{
+  "name": "workstation-web",
+  "version": "1.0.0",
+  "description": "Web development: Chrome DevTools for agents (MCP server per session, sandboxed Chromium, telemetry and CrUX off) and the Modern Web Guidance and Chrome DevTools skills, linked from the npm packages the ansible ai_workstation role installs in /opt/mcp. On in the general Code role and in web projects (~/sync/ai/web-projects.txt).",
+  "author": {
+    "name": "Peter Aufner"
+  }
+}

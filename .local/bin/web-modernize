@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# web-modernize: weekly Modern Web Guidance modernization of Peter's web projects (Peter, 2026-11-11).
+# Started by the user timer web-modernize.timer (Ansible ai_workstation, Sundays 08:00 Europe/Vienna, primary
+# workstation only). Runs one `rc code <project> --fresh` session after the other for the projects in
+# ~/sync/ai/web-projects.txt; each session follows its project's AGENTS.md, appends its result to the weekly
+# report and stops itself with `rc handoff-done --stop`. The rc guards apply: RAM minimum, one machine per
+# role, client repositories refused. A project whose role is already running is skipped, never interrupted.
+#   web-modernize [--dry-run] [project...]   (no projects: the whole list)
+set -euo pipefail
+
+LIST="${HOME}/sync/ai/web-projects.txt"
+REPORT_DIR="${HOME}/sync/ai/web-modernize"
+CODE_DIR="${HOME}/code"
+RC="${HOME}/.local/bin/rc"
+SESSION_MAX_SEC=$((3 * 3600))   # rc --ttl stops a session that never signals; the wait gives it 5 min more
+RAM_RETRIES=6                   # rc up refuses below its RAM minimum: retry every 10 min, then skip
+LOCK="${XDG_RUNTIME_DIR:-/tmp}/web-modernize.lock"
+
+dry=no
+[[ "${1:-}" == --dry-run ]] && { dry=yes; shift; }
+
+exec 9>"$LOCK"
+flock -n 9 || { echo "web-modernize is already running" >&2; exit 1; }
+
+slugify() {  # same rule as rc: role code-<slug>
+    iconv -f UTF-8 -t ASCII//TRANSLIT <<< "$1" 2>/dev/null | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-34
+}
+
+if [[ $# -gt 0 ]]; then
+    projects=("$@")
+else
+    [[ -r "$LIST" ]] || { echo "project list missing: $LIST" >&2; exit 1; }
+    mapfile -t projects < <(grep -v '^[[:space:]]*\(#\|$\)' "$LIST" | awk '{print $1}')
+fi
+
+today="$(date +%F)"
+report="${REPORT_DIR}/${today}.md"
+[[ "$dry" == yes ]] || mkdir -p "$REPORT_DIR"
+[[ "$dry" == yes || -e "$report" ]] || printf '# Web modernization %s\n\nModern Web Guidance %s, one session per project (web-modernize). Each section is written by that session.\n\n' \
+    "$today" "$(modern-web-guidance --version 2>/dev/null || echo '?')" > "$report"
+note() { printf -- '- %s: %s\n' "$1" "$2" | tee -a "$report"; }
+
+brief() {  # the standing order for one project
+    cat <<EOF
+Weekly web modernization of ${1} (standing order from Peter, 2026-11-11). The web-modernize timer started this session; nobody watches it live, so do not ask questions: decide within these rules and record open points.
+
+1. Read the project's AGENTS.md and .agents/ files first. Its rules on tests, review, branches, deploy and approval gates win over this brief.
+2. Run the Modern Web Guidance modernization workflow (skill modern-web-guidance, "Alternative flow") on the project's own frontend sources: \`modern-web-guidance legacy-scan <path> --json\`. Use the installed \`modern-web-guidance\` command (telemetry off, same version as the skill) instead of \`npx -y modern-web-guidance@latest\`. Leave out node_modules, vendored, generated and build output, and git submodules (each submodule repository has its own run). Verify every finding against its keepWhen/dropWhen rubric.
+3. Apply only verified, behaviour-preserving modernizations that fit the project's browser-support policy, each after \`modern-web-guidance retrieve <id>\`, on a feature branch. Run the project's build and tests; check changed pages with the chrome-devtools MCP (headless) where the project has a page to load; re-run legacy-scan on the changed files.
+4. All checks green: commit (Conventional Commits), merge and push, then publish exactly as the project's AGENTS.md says. Where it requires Peter's approval for a release or deploy, stop after the push and say so in the report. Failing checks, larger or behaviour-changing refactors, new dependencies or anything touching data protection: do not merge; add it to .agents/to-do.md as a proposal for Peter.
+5. Nothing to modernize: no commit.
+6. Append a section "## ${1}" to ${report}: findings kept and dropped, what changed (commit hash, merged, published or waiting for approval), proposals, problems. Keep it short; no secrets, no personal data.
+7. Write .agents/session-handoff.md, then run \`rc handoff-done --stop\` (this standing order lets the session stop its own role) and end the turn with one short line.
+EOF
+}
+
+for project in "${projects[@]}"; do
+    if [[ ! -d "${CODE_DIR}/${project}/.git" ]]; then note "$project" "skipped: no repository in ${CODE_DIR}"; continue; fi
+    role="code-$(slugify "$project")"
+    unit="claude-remote-control@${role}.service"
+    if systemctl --user is-active --quiet "$unit"; then note "$project" "skipped: role $role is already running"; continue; fi
+    if [[ "$dry" == yes ]]; then echo "would start $role"; continue; fi
+    started=no
+    for ((try = 0; try <= RAM_RETRIES; try++)); do
+        if out="$(brief "$project" | "$RC" code "$project" --fresh --ttl 3h --brief - 2>&1)"; then started=yes; break; fi
+        if [[ "$out" == *"RAM available"* && $try -lt $RAM_RETRIES ]]; then sleep 600; continue; fi
+        break
+    done
+    if [[ "$started" != yes ]]; then note "$project" "not started: $(tr '\n' ' ' <<< "$out" | cut -c1-300)"; continue; fi
+    echo "$(date +%T) started $role"
+    deadline=$((SECONDS + SESSION_MAX_SEC + 300))
+    sleep 60
+    # activating counts as running: a start right after an earlier stop retries for 1 to 2 min
+    while [[ "$(systemctl --user show -p ActiveState --value "$unit")" =~ ^(active|activating|reloading)$ ]]; do
+        if [[ $SECONDS -ge $deadline ]]; then "$RC" down "$role" --now >/dev/null 2>&1 || true; note "$project" "stopped after 3 h without its stop signal"; break; fi
+        sleep 60
+    done
+    grep -qxF "## ${project}" "$report" || note "$project" "session ended without a report section (see its .agents/session-handoff.md)"
+    echo "$(date +%T) finished $role"
+done
+echo "report: $report"
