@@ -9,6 +9,10 @@ if [[ -o interactive && -x /usr/local/bin/update-system ]]; then
     systemctl is-enabled --quiet topgrade-nightly.timer 2>/dev/null && timer=yes
     [[ -r $f ]] && read -r epoch result reboot < $f
     [[ $epoch == <-> ]] || epoch=0
+    # A boot after the run that asked for the reboot has done it (a manual shutdown or reboot too)
+    local key val boot=0
+    while read -r key val _; do [[ $key == btime ]] && { boot=$val; break; }; done < /proc/stat
+    [[ $reboot == yes && $boot == <-> ]] && (( boot > epoch )) && reboot=no
     days=$(( (EPOCHSECONDS - epoch) / 86400 ))
     local yellow=$'\e[33m' off=$'\e[0m'
     if [[ $timer == no ]]; then
