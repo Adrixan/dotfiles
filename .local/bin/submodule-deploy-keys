@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""Read-only deploy keys for private git submodules in GitHub Actions and Dependabot-triggered runs.
+
+For every repository of the owner whose .gitmodules (default branch) points at a private repository of the
+same owner, this keeps one read-only deploy key on the submodule repository (title "<consumer> CI (read-only)")
+and its private half as the Actions and Dependabot secret <NAME>_DEPLOY_KEY of the consumer, where NAME is the
+submodule name in upper case with every other character than A-Z and 0-9 replaced by "_" (web -> WEB_DEPLOY_KEY).
+Workflows map each such secret to an SSH host alias for that submodule; public submodules need no key.
+
+Private keys exist only in a private temporary directory during one run and are overwritten and removed
+afterwards; nothing is stored locally. Deploy keys do not expire, so no renewal is needed; --rotate replaces
+all keys (new key and secrets first, old key removed last, so CI never sees a gap).
+
+Authentication: the gh CLI login, or GH_TOKEN, or GITHUB_PERSONAL_ACCESS_TOKEN from the environment (needs repo
+scope: deploy keys and secrets of the owner's repositories).
+
+Usage: submodule-deploy-keys [--check] [--rotate] [--prune] [--retire SECRET ...] [--dry-run] [--repo NAME ...]
+                             [--owner LOGIN]
+  (no flag)  create missing or incomplete key pairs, leave intact ones alone
+  --check    report only; exit 1 when anything is missing, stale or orphaned
+  --rotate   replace every key pair (all, or the --repo consumers)
+  --prune    also delete orphaned "<consumer> CI (read-only)" keys and *_DEPLOY_KEY secrets nothing uses
+  --retire SECRET  delete this Actions and Dependabot secret from every consumer (an old token, e.g.)
+  --dry-run  show what would change
+Exit codes: 0 ok, 1 drift found by --check, 2 error.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+
+TITLE_SUFFIX = " CI (read-only)"
+SECRET_SUFFIX = "_DEPLOY_KEY"
+APPS = ("actions", "dependabot")
+CLOCK_SLACK = timedelta(minutes=2)
+
+
+class ToolError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Pair:
+    consumer: str  # repository that has the submodule
+    name: str  # submodule name in .gitmodules
+    target: str  # private submodule repository (same owner)
+
+    @property
+    def secret(self) -> str:
+        return re.sub(r"[^A-Z0-9]", "_", self.name.upper()) + SECRET_SUFFIX
+
+    @property
+    def title(self) -> str:
+        return self.consumer + TITLE_SUFFIX
+
+
+def gh(args: list[str], stdin: bytes | None = None, ok_404: bool = False) -> str | None:
+    proc = subprocess.run(["gh", *args], input=stdin, capture_output=True, check=False)
+    if proc.returncode != 0:
+        err = proc.stderr.decode(errors="replace").strip()
+        if ok_404 and ("HTTP 404" in err or "Not Found" in err):
+            return None
+        raise ToolError(f"gh {' '.join(args[:3])}: {err}")
+    return proc.stdout.decode()
+
+
+def gh_json(path: str, ok_404: bool = False) -> object:
+    out = gh(["api", path], ok_404=ok_404)
+    return None if out is None else json.loads(out)
+
+
+def gh_lines(path: str, jq: str) -> list[str]:
+    out = gh(["api", "--paginate", path, "--jq", jq]) or ""
+    return [line for line in out.splitlines() if line]
+
+
+def ts(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def parse_gitmodules(text: str) -> dict[str, dict[str, str]]:
+    modules: dict[str, dict[str, str]] = {}
+    current: dict[str, str] | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        head = re.fullmatch(r'\[submodule\s+"(.+)"\]', line)
+        if head:
+            current = modules.setdefault(head.group(1), {})
+        elif current is not None and "=" in line:
+            key, value = line.split("=", 1)
+            current[key.strip().lower()] = value.strip()
+    return modules
+
+
+def resolve(url: str, owner: str) -> str | None:
+    """Return the repository name when url points at a repository of owner on github.com, else None."""
+    url = url.removesuffix("/").removesuffix(".git")
+    rel = re.fullmatch(r"\.\./([A-Za-z0-9_.-]+)", url)
+    if rel:
+        return rel.group(1)
+    full = re.fullmatch(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+)/([^/]+)", url)
+    if full and full.group(1).lower() == owner.lower():
+        return full.group(2)
+    return None
+
+
+def discover(owner: str, only: set[str]) -> tuple[list[Pair], dict[str, str]]:
+    repos: dict[str, str] = {}
+    for line in gh_lines("user/repos?affiliation=owner&per_page=100",
+                         '.[] | select(.archived | not) | [.name, .visibility] | @tsv'):
+        name, visibility = line.split("\t")
+        repos[name] = visibility
+    pairs: list[Pair] = []
+    for consumer in sorted(repos):
+        if only and consumer not in only:
+            continue
+        data = gh_json(f"repos/{owner}/{consumer}/contents/.gitmodules", ok_404=True)
+        if not isinstance(data, dict) or "content" not in data:
+            continue
+        text = base64.b64decode(str(data["content"])).decode()
+        for name, cfg in parse_gitmodules(text).items():
+            target = resolve(cfg.get("url", ""), owner)
+            if target is None or repos.get(target) != "private":
+                continue
+            pairs.append(Pair(consumer, name, target))
+    seen: dict[tuple[str, str], Pair] = {}
+    for pair in pairs:
+        clash = seen.get((pair.consumer, pair.target))
+        if clash:
+            raise ToolError(f"{pair.consumer}: submodules {clash.name} and {pair.name} share {pair.target}; "
+                            "one deploy key title per consumer and target is supported")
+        seen[(pair.consumer, pair.target)] = pair
+    return pairs, repos
+
+
+class State:
+    def __init__(self, owner: str) -> None:
+        self.owner = owner
+        self._keys: dict[str, list[dict[str, object]]] = {}
+        self._secrets: dict[tuple[str, str], dict[str, str]] = {}
+
+    def keys(self, repo: str) -> list[dict[str, object]]:
+        if repo not in self._keys:
+            data = gh_json(f"repos/{self.owner}/{repo}/keys?per_page=100")
+            self._keys[repo] = list(data) if isinstance(data, list) else []
+        return self._keys[repo]
+
+    def secrets(self, repo: str, app: str) -> dict[str, str]:
+        if (repo, app) not in self._secrets:
+            data = gh_json(f"repos/{self.owner}/{repo}/{app}/secrets?per_page=100")
+            items = data.get("secrets", []) if isinstance(data, dict) else []
+            self._secrets[(repo, app)] = {str(s["name"]): str(s["updated_at"]) for s in items}
+        return self._secrets[(repo, app)]
+
+    def problems(self, pair: Pair) -> list[str]:
+        keys = [k for k in self.keys(pair.target) if k.get("title") == pair.title]
+        if not keys:
+            return [f"no deploy key '{pair.title}' on {pair.target}"]
+        found: list[str] = []
+        if len(keys) > 1:
+            found.append(f"{len(keys)} deploy keys '{pair.title}' on {pair.target}")
+        if any(k.get("read_only") is not True for k in keys):
+            found.append(f"deploy key '{pair.title}' on {pair.target} is writable")
+        newest = max(ts(str(k["created_at"])) for k in keys)
+        for app in APPS:
+            updated = self.secrets(pair.consumer, app).get(pair.secret)
+            if updated is None:
+                found.append(f"{app} secret {pair.secret} missing in {pair.consumer}")
+            elif ts(updated) + CLOCK_SLACK < newest:
+                found.append(f"{app} secret {pair.secret} in {pair.consumer} is older than its key")
+        return found
+
+
+def private_dir() -> Path:
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    root = Path(base) if base and Path(base).is_dir() else None
+    return Path(tempfile.mkdtemp(prefix="deploy-key-", dir=root))
+
+
+def wipe(directory: Path) -> None:
+    for item in directory.iterdir():
+        item.write_bytes(b"\0" * max(item.stat().st_size, 1))
+        item.unlink()
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+def install(state: State, pair: Pair) -> None:
+    owner = state.owner
+    old_ids = [int(str(k["id"])) for k in state.keys(pair.target) if k.get("title") == pair.title]
+    workdir = private_dir()
+    try:
+        os.chmod(workdir, 0o700)
+        key = workdir / "key"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", pair.title, "-f", str(key)],
+                       check=True, stdin=subprocess.DEVNULL)
+        public = (workdir / "key.pub").read_text().strip()
+        gh(["api", "-X", "POST", f"repos/{owner}/{pair.target}/keys",
+            "-f", f"title={pair.title}", "-f", f"key={public}", "-F", "read_only=true", "--silent"])
+        secret = key.read_bytes()
+        for app in APPS:
+            gh(["secret", "set", pair.secret, "--app", app, "-R", f"{owner}/{pair.consumer}"], stdin=secret)
+    finally:
+        wipe(workdir)
+    for key_id in old_ids:
+        gh(["api", "-X", "DELETE", f"repos/{owner}/{pair.target}/keys/{key_id}", "--silent"])
+
+
+def orphans(state: State, pairs: list[Pair], repos: dict[str, str], only: set[str]) -> list[tuple[str, str, str]]:
+    """(kind, repo, id-or-name) of deploy keys and secrets this tool made that no submodule uses any more."""
+    wanted_titles = {(p.target, p.title) for p in pairs}
+    wanted_secrets = {(p.consumer, p.secret) for p in pairs}
+    consumers = {p.consumer for p in pairs}
+    found: list[tuple[str, str, str]] = []
+    for target in sorted({p.target for p in pairs} | {r for r, v in repos.items() if v == "private"}):
+        try:
+            keys = state.keys(target)
+        except ToolError:
+            continue
+        for k in keys:
+            title = str(k.get("title", ""))
+            consumer = title.removesuffix(TITLE_SUFFIX)
+            if (title.endswith(TITLE_SUFFIX) and consumer in repos and (not only or consumer in only)
+                    and (target, title) not in wanted_titles):
+                found.append(("key", target, str(k["id"])))
+    for consumer in sorted(consumers | (only & set(repos))):
+        for app in APPS:
+            for name in state.secrets(consumer, app):
+                if name.endswith(SECRET_SUFFIX) and (consumer, name) not in wanted_secrets:
+                    found.append((f"{app}-secret", consumer, name))
+    return found
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--check", action="store_true")
+    parser.add_argument("--rotate", action="store_true")
+    parser.add_argument("--prune", action="store_true")
+    parser.add_argument("--retire", action="append", default=[], metavar="SECRET")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--repo", action="append", default=[], help="limit to these consumer repositories")
+    parser.add_argument("--owner")
+    args = parser.parse_args()
+    if args.check and (args.rotate or args.prune or args.retire):
+        parser.error("--check reports only")
+
+    if "GH_TOKEN" not in os.environ and subprocess.run(["gh", "auth", "status"], capture_output=True).returncode:
+        token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+        if not token:
+            raise ToolError("gh is not logged in and GITHUB_PERSONAL_ACCESS_TOKEN is not set")
+        os.environ["GH_TOKEN"] = token
+
+    owner = args.owner or (gh(["api", "user", "--jq", ".login"]) or "").strip()
+    only = set(args.repo)
+    pairs, repos = discover(owner, only)
+    state = State(owner)
+    drift = 0
+    for pair in pairs:
+        problems = [] if args.rotate else state.problems(pair)
+        label = f"{pair.consumer}: {pair.name} -> {pair.target} ({pair.secret})"
+        if not problems and not args.rotate:
+            print(f"ok      {label}")
+            continue
+        drift += 1
+        for problem in problems:
+            print(f"        {problem}")
+        if args.check or args.dry_run:
+            print(f"{'rotate' if args.rotate else 'fix':<8}{label}")
+            continue
+        install(state, pair)
+        print(f"{'rotated' if args.rotate else 'fixed':<8}{label}")
+    for kind, repo, ident in orphans(state, pairs, repos, only):
+        drift += 1
+        if args.prune and not args.dry_run:
+            if kind == "key":
+                gh(["api", "-X", "DELETE", f"repos/{owner}/{repo}/keys/{ident}", "--silent"])
+            else:
+                gh(["secret", "delete", ident, "--app", kind.removesuffix("-secret"), "-R", f"{owner}/{repo}"])
+            print(f"pruned  {kind} {repo} {ident}")
+        else:
+            print(f"orphan  {kind} {repo} {ident}{'' if args.prune else ' (remove with --prune)'}")
+    for name in args.retire:
+        for consumer in sorted({p.consumer for p in pairs}):
+            for app in APPS:
+                if name not in state.secrets(consumer, app):
+                    continue
+                if args.dry_run:
+                    print(f"retire  {app} secret {name} in {consumer}")
+                else:
+                    gh(["secret", "delete", name, "--app", app, "-R", f"{owner}/{consumer}"])
+                    print(f"retired {app} secret {name} in {consumer}")
+    if not pairs:
+        print("no private submodules found")
+    return 1 if args.check and drift else 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except ToolError as exc:
+        print(f"submodule-deploy-keys: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except subprocess.CalledProcessError as exc:
+        print(f"submodule-deploy-keys: {exc}", file=sys.stderr)
+        sys.exit(2)
