@@ -13,7 +13,11 @@
 #                                           one line per running role; --short: plus stopped roles and RAM)
 #   rc slash <ls|start|stop|restart|logs|menu|h> "<arguments>"
 #                                           the Greeter's slash commands (rc hook greeter-slash runs them)
-#   rc up <role> [--ttl 4h] [--fresh] [--force]  resumes the last session (relay keeps it ~4 h after a stop)
+#   rc up <role> [--ttl 4h] [--fresh] [--force] [--model M]  resumes the last session (relay keeps it ~4 h
+#                                           after a stop); --model (opus 5.5, fable 5.2, sonnet 5.5, haiku 5.5 or
+#                                           the ID) for this start only, every other start uses the default
+#                                           claude-opus-5-5 ("model" in ~/.claude/settings.json); rc code, trip,
+#                                           research and project take it too
 #   rc down <role> [--wait 10] [--now|--cancel]  stops seconds after each session ran rc handoff-done and
 #                                           ended that turn; after --wait minutes anyway unless a session
 #                                           is in a turn, after twice that in any case; --now stops at once
@@ -120,6 +124,12 @@ FOCUS_REMOTE="${STATE_DIR}/code-focus-remote"  # cse_<id> of a session -> projec
 PROJECT_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$'
 # Roles started with rc up and not stopped with rc down; the Greeter's start hook brings them back
 WANTED_DIR="${STATE_DIR}/wanted"
+# Model per start (Peter, 2026-11-13): rc up --model writes RC_MODEL=<id> to MODEL_DIR/<role>; the role's unit reads
+# it (EnvironmentFile) and exports ANTHROPIC_MODEL after ~/.config/ai/env. A start without --model removes the file,
+# so the role falls back to the default "model" of ~/.claude/settings.json (claude-opus-5-5).
+MODEL_DIR="${STATE_DIR}/model"
+DEFAULT_MODEL="claude-opus-5-5"
+MODEL_IDS="claude-opus-5-5 claude-fable-5-2 claude-sonnet-5-5 claude-haiku-5-5"  # checked against the API, 2026-11-13
 STOPPING_DIR="${STATE_DIR}/stopping"  # <role>: request, deadline and hard limit epochs of a pending rc down
 TURN_END_DIR="${STATE_DIR}/turn-end"  # <RC_DIR as key> and <cse_id>: epoch of the last turn end (Stop hook)
 DONE_DIR="${STATE_DIR}/handoff-done"  # <role>/<cse_id>: epoch a session reported its handoff (rc handoff-done)
@@ -512,14 +522,45 @@ resume_info() {  # a restart reattaches the previous session for about 4 h after
 }
 
 want() { mkdir -p "$WANTED_DIR"; touch -- "${WANTED_DIR}/$1"; }
+
+model_id() {  # model_id <words...>: "fable 5.2", "Fable-5.2", "opus", "claude-sonnet-5-5" -> model ID, or die
+    local w="${*,,}" id
+    w="${w//[[:space:]._]/-}"; w="${w#claude-}"
+    while [[ "$w" == *--* ]]; do w="${w//--/-}"; done
+    w="${w%-}"
+    case "$w" in
+        opus|opus-5-5|opus5-5) id=claude-opus-5-5 ;;
+        fable|fable-5-2|fable5-2) id=claude-fable-5-2 ;;
+        sonnet|sonnet-5-5|sonnet5-5) id=claude-sonnet-5-5 ;;
+        haiku|haiku-5-5|haiku5-5) id=claude-haiku-5-5 ;;
+        *) die "unknown model '$*' (known: opus 5.5, fable 5.2, sonnet 5.5, haiku 5.5)" ;;
+    esac
+    [[ " $MODEL_IDS " == *" $id "* ]] || die "model $id is not in MODEL_IDS"
+    echo "$id"
+}
+
+role_model() {  # role_model <role>: the model of the role's current or next start
+    local f="${MODEL_DIR}/$1"
+    if [[ -r "$f" ]]; then sed -n 's/^RC_MODEL="\(.*\)"$/\1/p' "$f"; else echo "$DEFAULT_MODEL"; fi
+}
+
+set_model() {  # set_model <role> [id]: model for this start; empty = the default
+    if [[ -n "${2:-}" ]]; then
+        mkdir -p "$MODEL_DIR"; chmod 700 "$MODEL_DIR"
+        (umask 077; printf 'RC_MODEL="%s"\n' "$2" > "${MODEL_DIR}/$1")
+    else
+        rm -f -- "${MODEL_DIR}/$1"
+    fi
+}
 unwant() { rm -f -- "${WANTED_DIR}/$1"; }
 
 cmd_up() {
-    local role ttl="" fresh=no force=no dir
+    local role ttl="" fresh=no force=no dir model=""
     role="$(resolve "${1:?role missing}")"; shift
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --ttl) ttl="${2:?--ttl needs a duration such as 4h}"; shift 2 ;;
+            --model) model="$(model_id "${2:?--model needs a model such as fable-5.2}")" || exit 1; shift 2 ;;
             --fresh) fresh=yes; shift ;;
             --force) force=yes; shift ;;
             *) usage ;;
@@ -528,7 +569,10 @@ cmd_up() {
     if systemctl --user is-active --quiet "$(unit "$role")"; then
         cancel_stop "$role"
         want "$role"
-        echo "$role is already running ($(sessions "$role") sessions)"
+        echo "$role is already running ($(sessions "$role") sessions, model $(role_model "$role"))"
+        if [[ -n "$model" && "$model" != "$(role_model "$role")" ]]; then
+            echo "it keeps that model; for $model: rc down $role --now, then rc up $role --model $model"
+        fi
         return
     fi
     peer_check "$role"
@@ -539,6 +583,7 @@ cmd_up() {
         die "only $(available_mb) MB RAM available (minimum ${MIN_AVAILABLE_MB}); stop a role or use --force"
     fi
     if [[ "$fresh" == yes ]]; then fresh_pointer "$role"; else resume_info "$role"; fi
+    set_model "$role" "$model"
     systemctl --user start "$(unit "$role")"
     want "$role"
     if [[ -n "$ttl" ]]; then
@@ -548,7 +593,7 @@ cmd_up() {
             "$RC_BIN" down "$role" --now
         echo "auto-stop in $ttl"
     fi
-    echo "started $role: open the session \"$(conf_get "$role" RC_NAME)\" in the Claude app (appears within about 30 s)"
+    echo "started $role with model $(role_model "$role")${model:+ (this start only)}: open the session \"$(conf_get "$role" RC_NAME)\" in the Claude app (appears within about 30 s)"
 }
 
 peer_check() {  # one machine runs a role at a time (Peter, 2026-11-04): refuse while the other workstation runs it
@@ -1421,7 +1466,8 @@ SLASH_CMDS="ls start stop restart logs menu h"
 SLASH_MODEL_RE='^(HANDOFF|BRIEF) |brief not queued'
 SLASH_HELP='Hosts: schulpc (default), xps, m11x, agentbox, edu-micro; add "on xps" or "@xps".
 /ls [host]     running roles on all hosts (one host: also its stopped roles)
-/start <what> [on host] [for 3h] [fresh] [force]
+/start <what> [on host] [for 3h] [fresh] [force] [with <model>]
+  model: opus 5.5 (default), fable 5.2, sonnet 5.5, haiku 5.5; this start only
   what: <role> | code <project> | code new <name> | code own <project>
         | research <topic> | trip <place> | project <name>
   ": <text>" at the end hands that text over as a brief
@@ -1511,7 +1557,7 @@ slash_ls() {
 }
 
 slash_start() {
-    local line="$1" brief="" kind host w i n out role
+    local line="$1" brief="" kind host w i n out role m
     local -a words opts=() rest=() args=() roles=()
     read -ra words <<< "$line"
     kind="${words[0]:-}"; kind="${kind,,}"
@@ -1531,6 +1577,14 @@ slash_start() {
         case "$w" in
             --fresh|--force) opts+=("$w"); continue ;;
             fresh|force) [[ "$kind" != research ]] && { opts+=("--$w"); continue; } ;;
+            with|mit|model|--model)  # "with fable 5.2", "mit opus", "--model sonnet-5.5": the model of this start
+                if (( i + 2 < n )) && m="$(model_id "${S_WORDS[i+1]}" "${S_WORDS[i+2]}" 2>/dev/null)" && [[ "${S_WORDS[i+2]}" =~ ^[0-9] ]]; then
+                    opts+=(--model "$m"); i=$(( i + 2 )); continue
+                fi
+                if (( i + 1 < n )) && m="$(model_id "${S_WORDS[i+1]}" 2>/dev/null)"; then
+                    opts+=(--model "$m"); i=$(( i + 1 )); continue
+                fi
+                [[ "$w" == --model ]] && { echo "unknown model after --model (opus 5.5, fable 5.2, sonnet 5.5, haiku 5.5)"; return 0; } ;;
             for|--ttl)
                 if (( i + 1 < n )) && [[ "${S_WORDS[i+1],,}" =~ ^[0-9]{1,3}(m|min|h|d)$ ]]; then
                     opts+=(--ttl "${S_WORDS[i+1],,}"); i=$(( i + 1 )); continue

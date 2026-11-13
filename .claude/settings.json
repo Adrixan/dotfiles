@@ -76,6 +76,7 @@
       "effortLevel": "high"
     }
   },
+  "model": "claude-opus-5-5",
   "autoMemoryEnabled": false,
   "skipWorkflowUsageWarning": true,
   "theme": "dark",

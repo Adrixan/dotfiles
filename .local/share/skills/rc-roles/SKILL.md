@@ -26,6 +26,14 @@ busy-session guards.
   allows that for about 4 hours after the stop; later a new session starts and reads
   `.agents/session-handoff.md`); `--ttl` stops the role automatically; `--fresh` starts a new session on
   purpose; `--force` skips the RAM guard (1 GB available). Pass on the resume line `rc up` prints.
+- Model (Peter, 2026-11-13): every session starts with `claude-opus-5-5` ("model" in `~/.claude/settings.json`,
+  the same on schulpc, xps13, agentbox and edu-micro). `--model <model>` on `rc up`, `rc code`, `rc trip`,
+  `rc research` and `rc project` picks another model for that start only: `opus 5.5`, `fable 5.2`,
+  `sonnet 5.5`, `haiku 5.5` or the ID (`claude-fable-5-2`); rc refuses anything else. The next start
+  without `--model` is back on Opus 5.5. A running role keeps its model: `rc down <role> --now`, wait one
+  to two minutes, then `rc up <role> --model ...`. In the Greeter: `/start code <project> with fable 5.2`.
+  Mechanism: rc writes `~/.local/state/claude-rc/model/<role>` (`RC_MODEL=<id>`), the role unit exports it
+  as `ANTHROPIC_MODEL`; `claude remote-control` itself has no `--model` flag.
 - `rc down <role> [--wait 10] [--now|--cancel]`: with sessions running it returns at once and a
   background unit `rc-stop-<role>` stops the role within seconds once every live session has run
   `rc handoff-done` and ended that turn. Fallback for a role with one session that does not signal: its
