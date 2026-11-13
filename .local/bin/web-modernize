@@ -6,7 +6,13 @@
 # PARALLEL at a time and only while enough RAM is free. Each session follows its project's AGENTS.md,
 # writes its own report file and stops itself with `rc handoff-done --stop`. The rc guards apply (RAM
 # minimum, one machine per role, client repositories refused). A role that is already running is skipped.
-#   web-modernize [--dry-run] [--parallel N] [project...]   (no projects: the whole list)
+# Android follow-up (Peter, 2026-11-13): the Android apps (~/code/*-android) embed web games as the submodule
+# web/. When the web sessions are done, every app whose web repository was part of this run and whose default
+# branch moved past the app's pin gets its own session, ANDROID_PARALLEL at a time (Peter: at least two; Gradle
+# and the emulator are serialized by the kit's locks): move the pin, rebuild, emulator smoke test, refresh the
+# signed builds in ~/sync/play-releases. Nothing goes to the Play Console.
+#   web-modernize [--dry-run] [--parallel N] [--android-parallel N] [--no-android] [project...]
+#   (no projects: the whole list)
 set -euo pipefail
 
 LIST="${HOME}/sync/ai/web-projects.txt"
@@ -16,17 +22,23 @@ PARALLEL=4
 START_MIN_MB=1500             # start another session only above this much available RAM (rc itself needs 1 GB)
 SESSION_MAX_SEC=$((3 * 3600))  # rc --ttl stops a session that never signals; the wait gives it 5 min more
 START_WAIT_MAX_SEC=$((4 * 3600))  # give up on projects that could not start for this long (RAM)
+ANDROID_PARALLEL=2            # app sessions at a time
+ANDROID_MIN_MB=2500           # start another app session only above this: Gradle and a 2 GB emulator run too
 LOCK="${XDG_RUNTIME_DIR:-/tmp}/web-modernize.lock"
 
 dry=no
+android=yes
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) dry=yes; shift ;;
         --parallel) PARALLEL="${2:?--parallel needs a number}"; shift 2 ;;
+        --android-parallel) ANDROID_PARALLEL="${2:?--android-parallel needs a number}"; shift 2 ;;
+        --no-android) android=no; shift ;;
         *) break ;;
     esac
 done
 [[ "$PARALLEL" =~ ^[1-9][0-9]*$ ]] || { echo "--parallel: a positive number" >&2; exit 2; }
+[[ "$ANDROID_PARALLEL" =~ ^[1-9][0-9]*$ ]] || { echo "--android-parallel: a positive number" >&2; exit 2; }
 
 exec 9>"$LOCK"
 flock -n 9 || { echo "web-modernize is already running" >&2; exit 1; }
@@ -70,6 +82,43 @@ Modern Web Guidance modernization of ${1} (standing order from Peter, 2026-11-11
 EOF
 }
 
+android_brief() {  # the standing order for one Android app: $1 app folder, $2 web project
+    cat <<EOF
+Android follow-up of the Modern Web Guidance modernization (standing order from Peter, 2026-11-13). The web game ${2} was modernized in this run and its default branch moved past the pin of the submodule web/ in ${1}. The web-modernize run started this session together with up to $((ANDROID_PARALLEL - 1)) other app sessions; nobody watches it live, so do not ask questions: decide within these rules and record open points.
+
+1. Read the project's AGENTS.md and .agents/ files first. Its rules on the submodule pin, tests, smoke tests, signing, release and approval gates win over this brief. Read the web report ${report_dir}/${2}.md to see what changed.
+2. Move the pin: \`git -C web fetch\`, check out the head of the web repository's default branch (only pushed commits). Never edit web/ or kit/.
+3. WebView check before building: the app runs in the Android System WebView (minSdk 24, Capacitor's minimum WebView version 60 unless the app sets another one), which can be older than the current Chrome, and the emulator only has a current WebView. For every web feature the modernization introduced, look up its Baseline status (\`modern-web-guidance retrieve <id>\` names it). Baseline "widely available": fine. Newer than that and not covered by a fallback in the web code: do not ship it; put the pin back, write the finding into .agents/to-do.md and the report, and go on with step 7.
+4. Run the project's checks as its AGENTS.md lists them: audit, typecheck, tests, build (the kit's dist gate), \`cap sync\`, Gradle lint and debug build through kit/scripts/gradle.sh, the emulator smoke test through kit/scripts/with-emulator.sh. Both scripts wait for locks shared with the other app sessions, so waiting there is normal; an emulator that crashes before the app is installed may be started once more. Regenerate what the project derives from the pin (SBOM extras, licence lists, examples) as its AGENTS.md says.
+5. All checks green: commit the pin (Conventional Commits), push, then refresh the signed builds exactly as the project's AGENTS.md says (release script with --sync into ~/sync/play-releases/<app>/, release smoke where it is the rule). Nothing is uploaded to the Play Console; no version bump unless the project's rules ask for one. Where the rules require Peter's approval, stop after the push and say so in the report.
+6. A failing check: do not commit the pin; put it back and add the problem to .agents/to-do.md as a proposal for Peter.
+7. Write the report file ${report_dir}/${1}.md (create it; touch no other file in that folder): old and new pin, WebView findings, check results, release files written or the reason they were not. Keep it short; no secrets, no personal data.
+8. Write .agents/session-handoff.md, then run \`rc handoff-done --stop\` (this standing order lets the session stop its own role) and end the turn with one short line.
+EOF
+}
+
+# Apps whose web/ submodule points to one of the given web projects (folder names, compared without case).
+android_candidates() {
+    local dir url web p
+    for dir in "${CODE_DIR}"/*-android; do
+        [[ -f "${dir}/.gitmodules" ]] || continue
+        url="$(git -C "$dir" config -f .gitmodules submodule.web.url 2>/dev/null)" || continue
+        web="$(basename "${url%.git}")"
+        for p in "$@"; do
+            if [[ "${p,,}" == "${web,,}" ]]; then printf '%s %s\n' "$(basename "$dir")" "$p"; break; fi
+        done
+    done
+}
+
+# True when the web repository's default branch is ahead of the app's pin.
+pin_behind() {
+    local web="${CODE_DIR}/$1/web" head
+    git -C "$web" fetch -q origin 2>/dev/null || return 1
+    head="$(git -C "$web" rev-parse -q --verify origin/HEAD 2>/dev/null || git -C "$web" rev-parse -q --verify origin/main 2>/dev/null)" || return 1
+    [[ "$head" != "$(git -C "$web" rev-parse HEAD)" ]] && git -C "$web" merge-base --is-ancestor HEAD "$head"
+}
+
+web_projects=("${queue[@]}")
 declare -A started_at=() project_of=()
 reap() {  # forget finished sessions, stop overdue ones
     local role
@@ -114,4 +163,35 @@ while [[ ${#queue[@]} -gt 0 ]]; do
     fi
 done
 while [[ ${#started_at[@]} -gt 0 ]]; do sleep 60; reap; done
+
+# Android follow-up, after every web session has ended.
+if [[ "$android" == yes ]]; then
+    declare -A web_of=()
+    apps=()
+    while read -r app web; do
+        [[ -n "$app" ]] || continue
+        if [[ "$dry" == yes ]]; then echo "would check $app (web $web) and start code-$(slugify "$app") if its pin is behind"; continue; fi
+        if pin_behind "$app"; then apps+=("$app"); web_of[$app]="$web"; else note "$app" "Android follow-up not needed: web/ is at the head of $web"; fi
+    done < <(android_candidates "${web_projects[@]}")
+    waiting_since=$SECONDS
+    while [[ ${#apps[@]} -gt 0 ]]; do
+        reap
+        app="${apps[0]}"
+        role="code-$(slugify "$app")"
+        if [[ -z "${started_at[$role]+x}" ]] && running "$role"; then note "$app" "skipped: role $role is already running"; apps=("${apps[@]:1}"); continue; fi
+        if (( ${#started_at[@]} >= ANDROID_PARALLEL )) || (( $(available_mb) < ANDROID_MIN_MB && ${#started_at[@]} > 0 )); then
+            sleep 60; continue
+        fi
+        if out="$(android_brief "$app" "${web_of[$app]}" | "$RC" code "$app" --fresh --ttl 3h --brief - 2>&1)"; then
+            started_at[$role]=$SECONDS; project_of[$role]="$app"; apps=("${apps[@]:1}"); waiting_since=$SECONDS
+            echo "$(date +%T) started $role ($(available_mb) MB available before the start)"
+            sleep 90
+        elif [[ "$out" == *"RAM available"* ]] && (( SECONDS - waiting_since < START_WAIT_MAX_SEC )); then
+            sleep 300
+        else
+            note "$app" "not started: $(tr '\n' ' ' <<< "$out" | cut -c1-300)"; apps=("${apps[@]:1}")
+        fi
+    done
+    while [[ ${#started_at[@]} -gt 0 ]]; do sleep 60; reap; done
+fi
 [[ "$dry" == yes ]] || echo "report: $index"
