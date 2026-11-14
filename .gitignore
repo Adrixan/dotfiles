@@ -1,0 +1,8 @@
+# Read only by the yadm repo (its work tree is $HOME; no other repository has $HOME as its root).
+# Home-level handoff note: out of the public dotfiles repo since 2026-11-14; it syncs between schulpc and
+# xps13 through the Syncthing folder "agents-home" (ansible ai_workstation tasks/agents_handoff.yml).
+/.agents/session-handoff.md
+/.agents/session-handoff.sync-conflict-*.md
+/.agents/.stignore
+/.agents/.stfolder/
+/.agents/.stversions/
