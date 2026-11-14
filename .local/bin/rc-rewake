@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# rc-rewake: Claude Code StopFailure hook (run with "asyncRewake": true).
+# When a turn ends because of a usage or rate limit, wait REWAKE_INTERVAL_MIN minutes
+# (plus jitter), then exit 2: Claude Code itself wakes that session and shows the
+# message as a system reminder. No agent, socket or private API is involved; a
+# session that is busy or waiting for Peter never gets here, because only a turn
+# that failed on the limit fires StopFailure. If the limit still holds, the retry
+# fails, StopFailure fires again and the next wait starts, up to REWAKE_MAX times.
+#
+# Config (optional): ~/.config/claude-rc/rewake.env
+#   REWAKE_MESSAGE       text of the nudge (the not-an-approval clause is always kept)
+#   REWAKE_INTERVAL_MIN  minutes between nudges (default 30)
+#   REWAKE_JITTER_SEC    random extra seconds to spread sessions (default 120)
+#   REWAKE_MAX           nudges per limit episode (default 24, about 12 h)
+#   REWAKE_ERRORS        error types that count, '|'-separated (default rate_limit)
+#   REWAKE_DRY_RUN       1 = log what would happen, never wake (default 0)
+# Logs: journalctl --user -t rc-rewake
+set -uo pipefail
+
+CLAUSE="This is not an approval: if you were waiting for Peter's decision, keep waiting."
+REWAKE_MESSAGE="continue: resume the task the usage limit interrupted."
+REWAKE_INTERVAL_MIN=30
+REWAKE_JITTER_SEC=120
+REWAKE_MAX=24
+REWAKE_ERRORS="rate_limit"
+REWAKE_DRY_RUN=0
+conf="${REWAKE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-rc/rewake.env}"
+# shellcheck source=/dev/null
+[[ -r $conf ]] && . "$conf"
+state_root="${XDG_STATE_HOME:-$HOME/.local/state}/claude-rc/rewake"
+
+log() { logger -t rc-rewake -- "$*" 2>/dev/null || printf 'rc-rewake: %s\n' "$*" >&2; }
+is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
+
+input=$(cat)
+command -v jq >/dev/null || { log "jq missing, nothing done"; exit 0; }
+sid=$(jq -r '.session_id // empty' <<<"$input")
+err=$(jq -r '.error // empty' <<<"$input")
+cwd=$(jq -r '.cwd // empty' <<<"$input")
+[[ $sid =~ ^[A-Za-z0-9_-]{8,64}$ ]] || { log "invalid session id, nothing done"; exit 0; }
+[[ "|$REWAKE_ERRORS|" == *"|$err|"* ]] || { log "session $sid: error '$err' not handled"; exit 0; }
+for v in REWAKE_INTERVAL_MIN REWAKE_JITTER_SEC REWAKE_MAX; do
+  is_uint "${!v}" || { log "config $v='${!v}' is not a number, nothing done"; exit 0; }
+done
+
+msg=$REWAKE_MESSAGE
+[[ $msg == *"This is not an approval"* ]] || msg="$msg $CLAUSE"
+
+dir="$state_root/$sid"
+mkdir -p "$dir" && chmod 700 "$state_root" "$dir"
+exec 9>"$dir/lock"
+flock -n 9 || { log "session $sid: a wait is already running, skipped"; exit 0; }
+
+now=$(date +%s); interval=$((REWAKE_INTERVAL_MIN * 60))
+count=0; last=0
+[[ -r $dir/count ]] && read -r count last <"$dir/count"
+is_uint "$count" || count=0; is_uint "$last" || last=0
+# A new limit episode starts when the last nudge is long past.
+(( now - last > 2 * interval + REWAKE_JITTER_SEC )) && count=0
+if (( count >= REWAKE_MAX )); then
+  log "session $sid ($cwd): $count nudges in this episode, giving up until Peter writes"
+  exit 0
+fi
+
+wait_s=$((interval + (REWAKE_JITTER_SEC > 0 ? RANDOM % (REWAKE_JITTER_SEC + 1) : 0)))
+if [[ $REWAKE_DRY_RUN == 1 ]]; then
+  log "DRY RUN session $sid ($cwd): $err, would nudge #$((count + 1)) in ${wait_s}s: $msg"
+  exit 0
+fi
+log "session $sid ($cwd): $err, nudge #$((count + 1)) in ${wait_s}s"
+sleep "$wait_s"
+printf '%s %s\n' "$((count + 1))" "$(date +%s)" >"$dir/count"
+log "session $sid: nudge #$((count + 1)) sent"
+printf '%s\n' "$msg" >&2
+exit 2
