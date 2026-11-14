@@ -60,6 +60,10 @@
 #   rc prepare-reboot                       before an unattended reboot: keeps the running roles on the
 #                                           restore list and leaves each a note for its restored session
 #   rc sync-confs                           exchanges custom role confs with the other workstation now
+#   rc lease [status|take|release|force]    takeover lease (schulpc <-> xps, Peter 2026-11-14): one machine
+#                                           serves the roles; rc up takes a free lease or refuses; take asks the
+#                                           holder to hand over and resumes its roles here; force takes it
+#                                           without asking (the other may still write: conflict copies follow)
 #                                           (every rc command does it first; ~/sync/ai/claude-rc)
 #   rc hook code-session|greeter-start|greeter-slash|research-session|turn-done
 #                                           SessionStart hooks of ~/code, the Greeter and research topics;
@@ -148,6 +152,8 @@ BRIEF_MAX=20000
 BRIEF=""; BRIEF_SET=no; UP_ARGS=()
 HANDOFF_RULE="Expert sessions: work that belongs to another role (code or tool development, a deep research, a trip, a vault project, educator) goes to that role's session, not here: start it with rc (rc code <project> or rc code --new <name>, rc research, rc trip, rc project, rc up educator), pass the full context with --brief - (stdin) or, for a running session, with SendMessage (ListAgents lists sessions on the other machines too), and tell Peter the label; see the skill rc-roles."
 RC_BIN="$(realpath -- "$0")"
+LEASE_BIN=/usr/local/libexec/workstation-lease  # Ansible ai_workstation lease.yml
+LEASE_CONF="${HOME}/.config/workstation-lease/config.json"
 RESUME_HOURS=4
 
 die() { echo "rc: $*" >&2; exit 1; }
@@ -488,6 +494,8 @@ cmd_ls() {
     done
     echo
     echo "* starts at boot. RAM available: $(available_mb) MB. Shared MCP service: $(systemctl --user is-active mcp-shared.service 2>/dev/null || true)"
+    if lease_on; then echo "Lease: $(lease status --cached 2>/dev/null)"; fi
+    return 0
 }
 
 fresh_pointer() {  # next start creates a new session instead of reattaching the last one
@@ -575,6 +583,7 @@ cmd_up() {
         fi
         return
     fi
+    lease_gate
     peer_check "$role"
     dir="$(conf_get "$role" RC_DIR)"
     [[ -d "$dir" ]] || die "folder missing: $dir"
@@ -594,6 +603,54 @@ cmd_up() {
         echo "auto-stop in $ttl"
     fi
     echo "started $role with model $(role_model "$role")${model:+ (this start only)}: open the session \"$(conf_get "$role" RC_NAME)\" in the Claude app (appears within about 30 s)"
+}
+
+lease_on() { [[ -x "$LEASE_BIN" && -f "$LEASE_CONF" ]]; }
+lease() { /usr/bin/python3 -I "$LEASE_BIN" "$@"; }
+
+lease_gate() {  # roles run on the lease holder only (D33 B): take a free or expired lease, else refuse
+    local st=0
+    lease_on || return 0
+    lease ensure >/dev/null 2>&1 || st=$?
+    case "$st" in
+        0) return 0 ;;
+        1) die "the lease is held by $(lease status --cached 2>/dev/null): rc lease take moves it here" ;;
+        *) die "the lease arbiter (GitHub) is not reachable and this machine holds no valid lease; rc lease status shows why" ;;
+    esac
+}
+
+cmd_lease() {  # rc lease [status|take|release|force]
+    local peer roles=() r st
+    lease_on || die "no takeover lease on this machine (Ansible: ai_workstation_lease)"
+    case "${1:-status}" in
+        status) lease status ;;
+        release) lease release ;;
+        take|force)
+            if lease check; then echo "this machine holds the lease: $(lease status --cached)"; return; fi
+            peer="$(peer_host)" st=0
+            [[ "$1" == take ]] && { lease ensure >/dev/null 2>&1 || st=$?; }
+            if [[ "$1" == take && "$st" == 0 ]]; then
+                echo "took the free lease: $(lease status --cached)"
+            elif [[ "$1" == take && "$st" != 1 ]]; then
+                die "the lease arbiter (GitHub) is not reachable; rc lease force takes it without asking"
+            elif [[ "$1" == take ]]; then
+                [[ -n "$peer" ]] || die "no other workstation to ask"
+                mapfile -t roles < <(host_running "$peer" 2>/dev/null || true)
+                echo "asking $peer to hand over: its roles stop after their handoffs (up to about 5 min)"
+                HOST_TIMEOUT=900 host_rc "$peer" lease release \
+                    || die "$peer did not release the lease; rc lease force takes it without asking"
+                lease acquire || die "could not take the lease after the release"
+            else
+                echo "taking the lease without asking ${peer:-the other machine}: it may still be writing, so conflict copies can follow"
+                lease acquire --force || die "could not take the lease"
+            fi
+            for r in greeter "${roles[@]}"; do
+                [[ -f "${CONF_DIR}/${r}.conf" ]] || continue
+                remote_role_target "$r" >/dev/null && continue
+                (RC_PEER_CHECK=no; cmd_up "$r") || echo "could not start $r here"
+            done ;;
+        *) usage ;;
+    esac
 }
 
 peer_check() {  # one machine runs a role at a time (Peter, 2026-11-04): refuse while the other workstation runs it
@@ -1243,6 +1300,8 @@ cmd_prepare_reboot() {  # before an unattended reboot: keep running roles wanted
         n=$((n + 1))
     done < <(running_roles)
     echo "prepared ${n} role(s) for the reboot"
+    # the lease outlives the reboot (45 min), so the standby does not take over meanwhile
+    if lease_on && lease check; then lease renew --ttl 2700 >/dev/null 2>&1 && echo "lease renewed for 45 min" || echo "lease renew failed"; fi
 }
 
 take_reboot_note() {  # take_reboot_note <RC_DIR>: print the restored session's message once, or nothing
@@ -1916,5 +1975,6 @@ case "${1:-ls}" in
     quiet) shift; cmd_quiet "$@" ;;
     prepare-reboot) cmd_prepare_reboot ;;
     sync-confs) cmd_sync_confs ;;
+    lease) shift; cmd_lease "$@" ;;
     *) usage ;;
 esac
