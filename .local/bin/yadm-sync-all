@@ -1,0 +1,308 @@
+#!/usr/bin/env bash
+# yadm-sync-all: run yadm pull, decrypt and alt (plus the known permission fixes) on every
+# workstation with a full yadm checkout. The decrypt passphrase is read once with a hidden
+# prompt, checked against the local archive and handed to each host on the SSH channel's
+# stdin; it never appears in argv, the environment, logs or files.
+#
+# Why not `yadm decrypt` itself: with yadm.cipher=openssl, yadm runs `openssl enc -d` without
+# a -pass option, so openssl reads the passphrase from /dev/tty. This script runs the same
+# openssl command (same cipher options, derived from the host's yadm config) with
+# `-pass fd:3` fed from a pipe, then does what `yadm decrypt` does around it (auto-excludes,
+# `yadm perms`).
+set -euo pipefail
+
+# Hosts with a full yadm checkout (SSH aliases from ~/.ssh/config; the host whose short
+# hostname matches runs locally). Checked 2026-11-14:
+# - agentbox: no yadm checkout (ubuntu, travel).
+# - edu-micro: the educator user has a checkout but deliberately none of the decrypted
+#   secrets, and its own rclone.conf would be overwritten by the archive. Left out on purpose.
+HOSTS=(schulpc xps m11x)
+
+# Rendered configs that `yadm alt` can leave at 0644 (WORKSTATION-details.md, Config ownership).
+CHMOD_600=(
+  .config/opencode/opencode.json
+  .gemini/config/mcp_config.json
+  .gemini/config/skills.json
+  .config/file-accountant/config.json
+)
+
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+
+usage() {
+  cat <<EOF
+Usage: ${0##*/} [options] [host ...]
+
+Runs on each host: source ~/.config/ai/env, yadm pull --ff-only (with the untracked
+.ssh/authorized_keys fix), decrypt, yadm perms, yadm alt, chmod 600 on rendered configs.
+
+Hosts (default all): ${HOSTS[*]}
+
+Options:
+  -n, --dry-run          no changes, no passphrase: check reachability and each host's
+                         yadm state (fetch --dry-run, status, cipher, archive)
+  -s, --skip HOST        leave HOST out (repeatable)
+  -u, --skip-unreachable report hosts that do not answer as SKIP instead of FAIL
+      --no-decrypt       pull and alt only, no passphrase needed
+      --passphrase-fd N  read the passphrase from file descriptor N instead of the prompt
+                         (one line, e.g. from a password manager pipe)
+  -h, --help             this text
+EOF
+}
+
+# ---------------------------------------------------------------------------------------
+# Per-host script. Runs under bash on the target (as argument of `bash -c`, so it contains
+# no secret). Mode argument: sync | nodecrypt | check. In sync mode the first stdin line is
+# the passphrase; stdin is closed right after reading it.
+read -r -d '' HOST_SCRIPT <<'HOST_EOF' || true
+set -uo pipefail
+mode=${1:?mode}
+shift
+chmod_list=("$@")
+pass=""
+if [ "$mode" = sync ]; then
+  IFS= read -r pass || true
+  [ -n "$pass" ] || { echo "FAIL: no passphrase on stdin"; exit 2; }
+fi
+exec </dev/null
+trap 'pass=""' EXIT
+
+host=$(hostname -s 2>/dev/null || hostname)
+say() { printf '  [%s] %s\n' "$host" "$*"; }
+die() { printf '  [%s] FAIL: %s\n' "$host" "$*"; exit 1; }
+
+cd "$HOME" || die "no home directory"
+command -v yadm >/dev/null || die "yadm not installed"
+command -v openssl >/dev/null || die "openssl not installed"
+
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/yadm"
+repo="$data_dir/repo.git"
+archive="$data_dir/archive"
+encrypt_list="${XDG_CONFIG_HOME:-$HOME/.config}/yadm/encrypt"
+[ -d "$repo" ] || die "no yadm repo at $repo"
+
+load_env() {
+  # Templates render secrets from this file; without it `yadm alt` writes blanks.
+  if [ -r "$HOME/.config/ai/env" ]; then
+    set +u
+    # shellcheck disable=SC1091
+    . "$HOME/.config/ai/env" || { set -u; die "sourcing ~/.config/ai/env failed"; }
+    set -u
+  else
+    die "$HOME/.config/ai/env missing: templates would render without secrets"
+  fi
+}
+
+openssl_opts() {
+  local cipher name
+  cipher=$(yadm config yadm.cipher)
+  [ "${cipher:-gpg}" = openssl ] || die "yadm.cipher is '${cipher:-gpg}', only openssl is supported"
+  name=$(yadm config yadm.openssl-ciphername)
+  ossl=(enc -d "-${name:-aes-256-cbc}" -salt)
+  if [ "$(yadm config --bool yadm.openssl-old)" = true ]; then
+    ossl+=(-md md5)
+  else
+    ossl+=(-pbkdf2 -iter 100000 -md sha512)
+  fi
+  ossl+=(-in "$archive" -pass fd:3)
+}
+
+decrypt_stream() { openssl "${ossl[@]}" 3< <(printf '%s\n' "$pass"); }
+
+refresh_excludes() {
+  # Same block `yadm decrypt` maintains in info/exclude.
+  [ "$(yadm config --bool yadm.auto-exclude)" = false ] && return 0
+  [ -e "$encrypt_list" ] || return 0
+  local excl="$repo/info/exclude" tmp
+  tmp=$(mktemp "$repo/info/exclude.XXXXXX") || die "mktemp in $repo/info failed"
+  {
+    [ -e "$excl" ] && sed '/^# yadm-auto-excludes$/,$d' "$excl"
+    printf '%s\n' '# yadm-auto-excludes' '# This section is managed by yadm.' '# Any edits below will be lost.'
+    cat "$encrypt_list"
+  } >"$tmp" || { rm -f "$tmp"; die "writing $tmp failed"; }
+  mv -f "$tmp" "$excl" || { rm -f "$tmp"; die "updating $excl failed"; }
+}
+
+if [ "$mode" = check ]; then
+  say "branch: $(yadm rev-parse --abbrev-ref HEAD 2>/dev/null), cipher: $(yadm config yadm.cipher)"
+  if [ -f "$archive" ]; then say "archive: present"; else say "archive: MISSING"; fi
+  if [ -r "$HOME/.config/ai/env" ]; then say "env: present"; else say "env: MISSING"; fi
+  if out=$(yadm fetch --dry-run origin 2>&1); then
+    if [ -n "$out" ]; then say "fetch would bring new commits"; else say "fetch: up to date with origin"; fi
+  else
+    die "fetch --dry-run failed: $out"
+  fi
+  dirty=$(yadm status --porcelain --untracked-files=no | wc -l)
+  say "locally modified tracked files: $dirty"
+  if [ -e .ssh/authorized_keys ] && ! yadm ls-files --error-unmatch .ssh/authorized_keys >/dev/null 2>&1; then
+    say "untracked .ssh/authorized_keys: pull will need the checkout fix"
+  fi
+  say "OK (dry run, nothing changed)"
+  exit 0
+fi
+
+load_env
+
+# Fail on a wrong passphrase before anything changes.
+if [ "$mode" = sync ]; then
+  [ -f "$archive" ] || die "no archive at $archive"
+  openssl_opts
+  decrypt_stream | tar tf - >/dev/null 2>&1 || die "archive does not decrypt with this passphrase"
+fi
+
+say "yadm pull --ff-only"
+if ! out=$(yadm pull --ff-only 2>&1); then
+  if grep -q 'untracked working tree files would be overwritten' <<<"$out" &&
+     grep -q '\.ssh/authorized_keys' <<<"$out"; then
+    say "untracked .ssh/authorized_keys blocks the pull: taking origin/master's copy"
+    cp -p .ssh/authorized_keys .ssh/authorized_keys.pre-yadm-sync || die "backup of authorized_keys failed"
+    yadm fetch origin >/dev/null 2>&1 || die "yadm fetch failed"
+    yadm checkout origin/master -- .ssh/authorized_keys || die "checkout of authorized_keys failed"
+    out=$(yadm pull --ff-only 2>&1) || die "yadm pull failed after the fix: $out"
+    say "previous authorized_keys kept as ~/.ssh/authorized_keys.pre-yadm-sync"
+  else
+    die "yadm pull failed: $out"
+  fi
+fi
+say "$(printf '%s' "$out" | tail -n 1)"
+
+if [ "$mode" = sync ]; then
+  # The pull may have brought a new archive or encrypt list.
+  [ -f "$archive" ] || die "no archive at $archive after pull"
+  openssl_opts
+  # Guard (2026-11-13): an exported DISABLE_TELEMETRY in ~/.config/ai/env breaks every rc role.
+  # grep -c reads all input (no SIGPIPE under pipefail); the env text never leaves the pipe.
+  n=$(decrypt_stream 2>/dev/null | tar xOf - .config/ai/env 2>/dev/null |
+    grep -Ec '^[[:space:]]*(export[[:space:]]+)?DISABLE_TELEMETRY=') || true
+  [ "${n:-0}" -eq 0 ] || die "archived ~/.config/ai/env exports DISABLE_TELEMETRY (breaks rc roles): fix env, yadm encrypt, commit, push, rerun"
+  refresh_excludes
+  say "decrypt"
+  decrypt_stream | tar xf - -C "$HOME" || die "decrypt failed (passphrase or archive changed upstream?)"
+  pass=""
+  yadm perms || die "yadm perms failed"
+  load_env   # env and env.local may have changed with the decrypt
+fi
+
+say "yadm alt"
+yadm alt >/dev/null || die "yadm alt failed"
+for f in "${chmod_list[@]}"; do
+  [ -e "$HOME/$f" ] && { chmod 600 "$HOME/$f" || die "chmod 600 $f failed"; }
+done
+say "OK"
+HOST_EOF
+# ---------------------------------------------------------------------------------------
+
+dry_run=0 skip_unreachable=0 decrypt=1 pass_fd=""
+skip=() selected=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    -n|--dry-run) dry_run=1 ;;
+    -u|--skip-unreachable) skip_unreachable=1 ;;
+    -s|--skip) [ $# -ge 2 ] || { echo "--skip needs a host" >&2; exit 2; }; skip+=("$2"); shift ;;
+    --no-decrypt) decrypt=0 ;;
+    --passphrase-fd)
+      [[ ${2:-} =~ ^[0-9]+$ ]] || { echo "--passphrase-fd needs a number" >&2; exit 2; }
+      pass_fd=$2; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) selected+=("$1") ;;
+  esac
+  shift
+done
+
+in_list() { local x=$1; shift; local y; for y in "$@"; do [ "$x" = "$y" ] && return 0; done; return 1; }
+
+for h in "${selected[@]}" "${skip[@]}"; do
+  in_list "$h" "${HOSTS[@]}" || { echo "unknown host '$h' (known: ${HOSTS[*]})" >&2; exit 2; }
+done
+targets=()
+for h in "${HOSTS[@]}"; do
+  [ ${#selected[@]} -gt 0 ] && ! in_list "$h" "${selected[@]}" && continue
+  [ ${#skip[@]} -gt 0 ] && in_list "$h" "${skip[@]}" && continue
+  targets+=("$h")
+done
+[ ${#targets[@]} -gt 0 ] || { echo "no hosts selected" >&2; exit 2; }
+
+local_host=$(hostname -s 2>/dev/null || hostname)
+mode=sync
+[ "$decrypt" = 1 ] || mode=nodecrypt
+[ "$dry_run" = 1 ] && mode=check
+
+# Passphrase: once, hidden, checked against the local archive before any host is touched.
+pass=""
+cleanup() { pass=""; unset pass; }
+trap cleanup EXIT
+trap 'cleanup; echo; exit 130' INT TERM
+
+local_archive="${XDG_DATA_HOME:-$HOME/.local/share}/yadm/archive"
+local_ossl() {
+  local name
+  name=$(yadm config yadm.openssl-ciphername)
+  printf '%s\n' enc -d "-${name:-aes-256-cbc}" -salt
+  if [ "$(yadm config --bool yadm.openssl-old)" = true ]; then
+    printf '%s\n' -md md5
+  else
+    printf '%s\n' -pbkdf2 -iter 100000 -md sha512
+  fi
+}
+check_pass() {
+  local -a o
+  mapfile -t o < <(local_ossl)
+  openssl "${o[@]}" -in "$local_archive" -pass fd:3 3< <(printf '%s\n' "$pass") 2>/dev/null | tar tf - >/dev/null 2>&1
+}
+
+if [ "$mode" = sync ]; then
+  [ -f "$local_archive" ] || { echo "no local archive at $local_archive to check the passphrase" >&2; exit 1; }
+  [ "$(yadm config yadm.cipher)" = openssl ] || { echo "local yadm.cipher is not openssl" >&2; exit 1; }
+  if [ -n "$pass_fd" ]; then
+    IFS= read -r pass <&"$pass_fd" || true
+    check_pass || { echo "passphrase from fd $pass_fd does not decrypt the local archive" >&2; exit 1; }
+  else
+    [ -r /dev/tty ] || { echo "no terminal for the passphrase prompt (use --passphrase-fd)" >&2; exit 1; }
+    for try in 1 2 3; do
+      IFS= read -rs -p "yadm decrypt passphrase: " pass </dev/tty || true
+      echo >/dev/tty
+      [ -n "$pass" ] && check_pass && break
+      pass=""
+      echo "wrong passphrase ($try/3)" >&2
+    done
+    [ -n "$pass" ] || exit 1
+  fi
+  echo "passphrase OK (local archive decrypts)"
+fi
+
+declare -A result
+quoted_script=$(printf '%q' "$HOST_SCRIPT")
+quoted_chmod=$(printf '%q ' "${CHMOD_600[@]}")
+
+for h in "${targets[@]}"; do
+  echo "== $h"
+  if [ "$h" = "$local_host" ]; then
+    run=(bash -c "$HOST_SCRIPT" yadm-sync-host "$mode" "${CHMOD_600[@]}")
+  else
+    if ! ssh "${SSH_OPTS[@]}" "$h" true </dev/null >/dev/null 2>&1; then
+      if [ "$skip_unreachable" = 1 ]; then
+        echo "  unreachable, skipped"; result[$h]=SKIP
+      else
+        echo "  unreachable (ssh $h failed)"; result[$h]=FAIL
+      fi
+      continue
+    fi
+    run=(ssh "${SSH_OPTS[@]}" "$h" "bash -c $quoted_script yadm-sync-host $mode $quoted_chmod")
+  fi
+  if [ "$mode" = sync ]; then
+    if printf '%s\n' "$pass" | "${run[@]}"; then result[$h]=OK; else result[$h]=FAIL; fi
+  else
+    if "${run[@]}" </dev/null; then result[$h]=OK; else result[$h]=FAIL; fi
+  fi
+done
+
+cleanup
+
+echo
+echo "Summary ($mode):"
+rc=0
+for h in "${targets[@]}"; do
+  printf '  %-10s %s\n' "$h" "${result[$h]}"
+  [ "${result[$h]}" = FAIL ] && rc=1
+done
+exit "$rc"
