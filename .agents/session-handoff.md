@@ -149,3 +149,11 @@ Maintain a portable, secure, conflict-free multi-harness AI workstation configur
 - Trust script: `~/.local/bin/rc-trust-all` (yadm a9435e4): `--list`, `--peer schulpc`, `--consent`; all 25 folders trusted. `hasUsedRemoteControl` appears only after the first served session, so `--list` keeps showing the consent as TODO until then.
 - Peter did all manual steps: `.env` copy (petersgasse-wordpress connected), file-accountant aligned with origin, Cloudflare login, Thunderbird add-on, PTSD `pnpm mcp:login`, Remote Control consent (verified by a test `rc up phd` on xps13, stopped again).
 - Open: nothing for this task. Optional: add `~/code/petersgasse.at/.env` to the yadm encrypt list (Peter's passphrase). After code-sync pulls PTSD: `pnpm mcp:build` and `systemctl --user restart mcp-shared`.
+
+## 2026-11-14: yadm-sync-all (fleet pull, decrypt, alt)
+- Peter (via Greeter): one script that asks the decrypt passphrase once and runs yadm pull, decrypt, alt on all relevant hosts.
+- Done: yadm `~/.local/bin/yadm-sync-all` (commit b9978f2, merged e8fc271). Hosts schulpc (local), xps, m11x. Out on purpose: agentbox (no yadm), edu-micro `educator` (checkout without decrypted secrets; the archive would overwrite its own `rclone.conf` and put schulpc's SSH keys and tokens on the VM).
+- Mechanics: openssl `-pass fd:3` fed from a pipe (yadm 3.3 has no passphrase option for openssl); mirrors `yadm decrypt` (cipher options from yadm config, auto-excludes, `yadm perms`); then re-sources env, `yadm alt`, chmod 600 of the four rendered configs. Untracked `authorized_keys` fix with backup `.ssh/authorized_keys.pre-yadm-sync`. Per host the archived env is checked for an exported `DISABLE_TELEMETRY` before extraction.
+- Verified: bash -n, shellcheck (main and embedded host script), sandbox HOME with bare origin and test passphrase (wrong pass, authorized_keys fix, template re-render, perms, excludes, idempotent rerun, --no-decrypt, telemetry guard), SSH stdin delivery to xps, `--dry-run` on all three real hosts OK (xps13 has 3 local modifications that do not overlap the incoming commits).
+- Not done: the real decrypt run (Peter's passphrase): `yadm-sync-all` (or `yadm-sync-all -u` when xps13 sleeps).
+- Note: yadm checkout/merge on schulpc re-rendered the configs at 644; fixed with chmod 600 the same minute.
