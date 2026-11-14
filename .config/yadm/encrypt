@@ -7,3 +7,4 @@
 .research_stack.env
 .config/edu-publish/config.toml
 code/helbling-media-downloader/.env.local
+code/petersgasse.at/.env
