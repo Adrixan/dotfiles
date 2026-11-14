@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# yadm-gpg-genkey NAME [--passphrase]: create this device's key for the yadm archive and write
+# its public key to ~/.config/yadm/recipients/NAME.asc (track that file in yadm, then run
+# yadm-reencrypt on a device that can decrypt). Workstations: no passphrase, so yadm-sync-all
+# decrypts unattended (LUKS protects the key at rest). --passphrase (phone, recovery key):
+# gpg asks for one; the device then decrypts only interactively.
+set -euo pipefail
+name=${1:?usage: yadm-gpg-genkey NAME [--passphrase]}
+[[ $name =~ ^[a-z0-9-]+$ ]] || { echo "NAME: lowercase letters, digits, dashes" >&2; exit 2; }
+ask=0; [ "${2:-}" = --passphrase ] && ask=1
+uid="yadm archive ($name)"
+dir="${XDG_CONFIG_HOME:-$HOME/.config}/yadm/recipients"
+if ! gpg --batch --list-secret-keys "=$uid" >/dev/null 2>&1; then
+  if [ "$ask" = 1 ]; then
+    gpg --quiet --quick-gen-key "$uid" ed25519 cert never
+  else
+    gpg --batch --quiet --passphrase '' --quick-gen-key "$uid" ed25519 cert never
+  fi
+  fpr=$(gpg --with-colons --list-keys "=$uid" | awk -F: '/^fpr/{print $10; exit}')
+  if [ "$ask" = 1 ]; then
+    gpg --quiet --quick-add-key "$fpr" cv25519 encr never
+  else
+    gpg --batch --quiet --passphrase '' --quick-add-key "$fpr" cv25519 encr never
+  fi
+fi
+fpr=$(gpg --with-colons --list-keys "=$uid" | awk -F: '/^fpr/{print $10; exit}')
+printf '%s:6:\n' "$fpr" | gpg --batch --quiet --import-ownertrust 2>/dev/null
+mkdir -p "$dir"
+gpg --export --armor "$fpr" >"$dir/$name.asc"
+echo "$name $fpr -> $dir/$name.asc"

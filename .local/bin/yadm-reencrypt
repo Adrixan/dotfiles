@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# yadm-reencrypt [--changed] [--no-push]: encrypt the yadm archive to every public key in
+# ~/.config/yadm/recipients, check that this device's key decrypts it to the files on disk,
+# commit archive and recipients, push. Needs no passphrase, so agents may run it.
+# Guard against rolling secrets back: refuses unless this device is level with origin and its
+# decrypted files equal the current archive; --changed allows deliberate secret edits (the
+# differing files are listed). Plain git throughout: `yadm <git cmd>` would trigger yadm alt.
+set -euo pipefail
+changed=0 push=1
+for a in "$@"; do
+  case $a in --changed) changed=1 ;; --no-push) push=0 ;; *) echo "unknown option $a" >&2; exit 2 ;; esac
+done
+data="${XDG_DATA_HOME:-$HOME/.local/share}/yadm"; repo="$data/repo.git"; archive="$data/archive"
+conf="${XDG_CONFIG_HOME:-$HOME/.config}/yadm"; dir="$conf/recipients"
+g() { git --git-dir="$repo" --work-tree="$HOME" "$@"; }
+die() { echo "yadm-reencrypt: $*" >&2; exit 1; }
+cd "$HOME"
+
+mapfile -t fprs < <(for f in "$dir"/*.asc; do [ -e "$f" ] && gpg --batch --with-colons --import-options show-only --import "$f" 2>/dev/null | awk -F: '/^pub/{p=1; next} p && /^fpr/{print $10; p=0}'; done | sort -u)
+[ ${#fprs[@]} -gt 0 ] || die "no public keys in $dir"
+for f in "$dir"/*.asc; do gpg --batch --quiet --import "$f" 2>/dev/null || die "importing $f failed"; done
+printf '%s:6:\n' "${fprs[@]}" | gpg --batch --quiet --import-ownertrust 2>/dev/null
+own=""; for f in "${fprs[@]}"; do gpg --batch --list-secret-keys "$f" >/dev/null 2>&1 && own=$f; done
+[ -n "$own" ] || die "this device has no secret key among the recipients, so it cannot verify the result"
+git config --file "$conf/config" yadm.cipher gpg
+git config --file "$conf/config" yadm.gpg-recipient "${fprs[*]}"
+
+g fetch -q origin || die "fetch failed"
+[ "$(g rev-parse HEAD)" = "$(g rev-parse '@{u}')" ] || die "not level with origin: run yadm-sync-all for this device first"
+
+tmp=$(mktemp -d "$data/reencrypt.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
+diffs=()
+if [ -f "$archive" ] && gpg --batch --quiet --decrypt "$archive" 2>/dev/null | tar xf - -C "$tmp/" 2>/dev/null; then
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    cmp -s "$tmp/$f" "$HOME/$f" 2>/dev/null || diffs+=("$f")
+  done < <(cd "$tmp" && find . -type f -printf '%P\n'; cd "$HOME" && while IFS= read -r p; do [ -n "$p" ] && [ -e "$p" ] && find "$p" -type f -printf '%p\n'; done <"$conf/encrypt")
+  mapfile -t diffs < <(printf '%s\n' "${diffs[@]}" | sort -u | sed '/^$/d')
+  if [ ${#diffs[@]} -gt 0 ] && [ "$changed" = 0 ]; then
+    die "files on disk differ from the current archive (${diffs[*]}); pass --changed if these edits are meant to go in"
+  fi
+else
+  [ "$changed" = 1 ] || die "the current archive does not decrypt with this device's key; pass --changed to encrypt from the files on disk anyway"
+fi
+rm -rf "$tmp"; tmp=$(mktemp -d "$data/reencrypt.XXXXXX")
+
+yadm encrypt </dev/null >/dev/null || die "yadm encrypt failed"
+gpg --batch --quiet --decrypt "$archive" | tar xf - -C "$tmp/" || die "the new archive does not decrypt with this device's key"
+n=0; while IFS= read -r f; do cmp -s "$tmp/$f" "$HOME/$f" || die "verify: $f differs"; n=$((n+1)); done < <(cd "$tmp" && find . -type f -printf '%P\n')
+count=$(gpg --list-packets "$archive" 2>/dev/null | grep -c 'pubkey enc packet') || true
+echo "archive: $n files, $count recipients (${#fprs[@]} keys listed)"
+[ "$count" -eq ${#fprs[@]} ] || die "recipient count mismatch"
+
+g add -- .local/share/yadm/archive "$dir"
+if g diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+what="re-encrypt the archive to ${#fprs[@]} gpg keys"
+[ ${#diffs[@]} -gt 0 ] && what="$what (changed: ${#diffs[@]} file(s))"
+g commit -q -m "chore(yadm): $what" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- .local/share/yadm/archive "$dir"
+echo "committed $(g rev-parse --short HEAD)"
+[ "$push" = 1 ] && { g push -q origin HEAD || die "push failed: the commit stays local"; echo "pushed"; }
