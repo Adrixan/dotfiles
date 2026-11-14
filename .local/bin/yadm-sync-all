@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # yadm-sync-all: run yadm pull, decrypt and alt (plus the known permission fixes) on every
-# workstation with a full yadm checkout. The decrypt passphrase is read once with a hidden
-# prompt, checked against the local archive and handed to each host on the SSH channel's
-# stdin; it never appears in argv, the environment, logs or files.
+# workstation with a full yadm checkout.
 #
-# Why not `yadm decrypt` itself: with yadm.cipher=openssl, yadm runs `openssl enc -d` without
-# a -pass option, so openssl reads the passphrase from /dev/tty. This script runs the same
-# openssl command (same cipher options, derived from the host's yadm config) with
-# `-pass fd:3` fed from a pipe, then does what `yadm decrypt` does around it (auto-excludes,
-# `yadm perms`).
+# Cipher (2026-11-14): the archive is gpg-encrypted to one key per device plus a recovery key.
+# The public keys are tracked in ~/.config/yadm/recipients/*.asc; after the pull each host
+# imports them, trusts exactly these keys and sets its own yadm.cipher=gpg and
+# yadm.gpg-recipient, then decrypts in batch mode with its own key (no passphrase). A host
+# without a key among the recipients stops with the command to create one (yadm-gpg-genkey).
+#
+# Legacy openssl hosts: the passphrase is read once with a hidden prompt, checked against the
+# local archive and handed to each host on the SSH channel's stdin (never argv, environment,
+# logs or files) into `openssl -pass fd:3`, mirroring `yadm decrypt` (auto-excludes, perms).
 set -euo pipefail
 
 # Hosts with a full yadm checkout (SSH aliases from ~/.ssh/config; the host whose short
@@ -50,14 +52,14 @@ Exit status: 0 all OK, 1 a host failed, 2 usage, 3 done with warnings (e.g. push
 Hosts (default all): ${HOSTS[*]}
 
 Options:
-  -n, --dry-run          no changes, no passphrase: check reachability and each host's
+  -n, --dry-run          no changes: check reachability and each host's
                          yadm state (fetch of remote-tracking refs, local changes and
                          how the sync would treat them, cipher, archive)
   -s, --skip HOST        leave HOST out (repeatable)
   -u, --skip-unreachable report hosts that do not answer as SKIP instead of FAIL
-      --no-decrypt       pull and alt only, no passphrase needed
-      --passphrase-fd N  read the passphrase from file descriptor N instead of the prompt
-                         (one line, e.g. from a password manager pipe)
+      --no-decrypt       pull and alt only
+      --passphrase-fd N  legacy openssl archive only: read the passphrase from file
+                         descriptor N instead of the prompt
   -h, --help             this text
 EOF
 }
@@ -74,8 +76,8 @@ shift 2
 chmod_list=("$@")
 pass=""
 if [ "$mode" = sync ]; then
+  # One line: the openssl passphrase, or empty for gpg hosts.
   IFS= read -r pass || true
-  [ -n "$pass" ] || { echo "FAIL: no passphrase on stdin"; exit 2; }
 fi
 exec </dev/null
 
@@ -136,10 +138,45 @@ load_env() {
   fi
 }
 
+recipients_dir="${XDG_CONFIG_HOME:-$HOME/.config}/yadm/recipients"
+
+# Fingerprints of the tracked recipient keys (primary keys), one per line.
+recipient_fprs() {
+  local f
+  for f in "$recipients_dir"/*.asc; do
+    [ -e "$f" ] || continue
+    gpg --batch --with-colons --import-options show-only --import "$f" 2>/dev/null |
+      awk -F: '/^pub/{p=1; next} p && /^fpr/{print $10; p=0}'
+  done | sort -u
+}
+
+# Import the tracked recipient keys, trust exactly these, point this host's yadm config at them.
+setup_gpg() {
+  local fprs f own="" want
+  mapfile -t fprs < <(recipient_fprs)
+  [ ${#fprs[@]} -gt 0 ] || return 1
+  command -v gpg >/dev/null || die "gpg not installed"
+  for f in "$recipients_dir"/*.asc; do
+    gpg --batch --quiet --import "$f" 2>/dev/null || die "importing $f failed"
+  done
+  printf '%s:6:\n' "${fprs[@]}" | gpg --batch --quiet --import-ownertrust 2>/dev/null ||
+    die "setting trust on the recipient keys failed"
+  for f in "${fprs[@]}"; do
+    gpg --batch --list-secret-keys "$f" >/dev/null 2>&1 && own=$f
+  done
+  want="${fprs[*]}"
+  if [ "$(cfg yadm.cipher)" != gpg ] || [ "$(cfg yadm.gpg-recipient)" != "$want" ]; then
+    if ! { git config --file "$yadm_cfg" yadm.cipher gpg && git config --file "$yadm_cfg" yadm.gpg-recipient "$want"; }; then
+      die "writing $yadm_cfg failed"
+    fi
+    say "yadm config: cipher gpg, ${#fprs[@]} recipients"
+  fi
+  gpg_own=$own
+  return 0
+}
+
 openssl_opts() {
-  local cipher name
-  cipher=$(cfg yadm.cipher)
-  [ "${cipher:-gpg}" = openssl ] || die "yadm.cipher is '${cipher:-gpg}', only openssl is supported"
+  local name
   name=$(cfg yadm.openssl-ciphername)
   ossl=(enc -d "-${name:-aes-256-cbc}" -salt)
   if [ "$(cfg --bool yadm.openssl-old)" = true ]; then
@@ -150,7 +187,13 @@ openssl_opts() {
   ossl+=(-in "$archive" -pass fd:3)
 }
 
-decrypt_stream() { openssl "${ossl[@]}" 3< <(printf '%s\n' "$pass"); }
+decrypt_stream() {
+  if [ "$(cfg yadm.cipher)" = gpg ]; then
+    gpg --batch --quiet --decrypt "$archive"
+  else
+    openssl "${ossl[@]}" 3< <(printf '%s\n' "$pass")
+  fi
+}
 
 refresh_excludes() {
   # Same block `yadm decrypt` maintains in info/exclude.
@@ -184,6 +227,18 @@ blocked() {
 ff_merge() {
   local out
   if out=$(g merge --ff-only "$up" 2>&1); then merge_out=$out; return 0; fi
+  # Untracked files that upstream now tracks with the same bytes (e.g. a device's own
+  # recipients/<name>.asc from yadm-gpg-genkey): removing them loses nothing.
+  if grep -q 'untracked working tree files would be overwritten' <<<"$out"; then
+    local f same=0 blocking=()
+    mapfile -t blocking < <(sed -n 's/^\t//p' <<<"$out")
+    for f in "${blocking[@]}"; do
+      if [ -f "$HOME/$f" ] && g show "$up:$f" 2>/dev/null | cmp -s - "$HOME/$f"; then
+        rm -f -- "$HOME/$f" && same=$((same+1)) && say "$f: untracked copy equals upstream, taking the tracked one"
+      fi
+    done
+    if [ "$same" -gt 0 ] && out=$(g merge --ff-only "$up" 2>&1); then merge_out=$out; return 0; fi
+  fi
   if grep -q 'untracked working tree files would be overwritten' <<<"$out" &&
      grep -q '\.ssh/authorized_keys' <<<"$out"; then
     say "untracked .ssh/authorized_keys blocks the merge: taking $up's copy"
@@ -291,12 +346,17 @@ fi
 
 if [ "$mode" = check ]; then
   [ "$untracked_keys" = 1 ] && say "untracked .ssh/authorized_keys: the merge may need the checkout fix"
+  if g cat-file -e "$up:.config/yadm/recipients" 2>/dev/null; then
+    n_up=$(g ls-tree --name-only "$up" .config/yadm/recipients/ | grep -c '\.asc$')
+    have=$(gpg --batch --with-colons --list-secret-keys 2>/dev/null | grep -c '^uid:.*yadm archive') || true
+    say "gpg: $n_up recipient key(s) upstream, local yadm archive secret keys: $have"
+  fi
   say "OK (dry run: only remote-tracking refs were fetched)"
   exit 0
 fi
 
-# Fail on a wrong passphrase before anything changes.
-if [ "$mode" = sync ]; then
+# Openssl host with a passphrase: fail on a wrong one before anything changes.
+if [ "$mode" = sync ] && [ "$(cfg yadm.cipher)" != gpg ] && [ -n "$pass" ]; then
   [ -f "$archive" ] || die "no archive at $archive"
   openssl_opts
   decrypt_stream 2>/dev/null | tar tf - >/dev/null 2>&1 || die "archive does not decrypt with this passphrase"
@@ -344,10 +404,20 @@ else
   [ -n "$stash" ] && merge_notes
 fi
 
+gpg_own=""
+if setup_gpg && [ "$mode" = sync ] && [ -z "$gpg_own" ]; then
+  die "no secret key of this host among the yadm recipients: run yadm-gpg-genkey $alias_name here, copy its .asc into ~/.config/yadm/recipients on a host that can decrypt, run yadm-reencrypt there, rerun"
+fi
+
 if [ "$mode" = sync ]; then
   # The pull may have brought a new archive or encrypt list.
   [ -f "$archive" ] || die "no archive at $archive after pull"
-  openssl_opts
+  if [ "$(cfg yadm.cipher)" = gpg ]; then
+    decrypt_stream 2>/dev/null | tar tf - >/dev/null 2>&1 || die "the archive does not decrypt with this host's key (not among its recipients? run yadm-reencrypt on a host that can decrypt)"
+  else
+    [ -n "$pass" ] || die "the archive is openssl-encrypted and no passphrase was given"
+    openssl_opts
+  fi
   # Guard (2026-11-13): an exported DISABLE_TELEMETRY in ~/.config/ai/env breaks every rc role.
   # grep -c reads all input (no SIGPIPE under pipefail); the env text never leaves the pipe.
   n=$(decrypt_stream 2>/dev/null | tar xOf - .config/ai/env 2>/dev/null |
@@ -355,7 +425,7 @@ if [ "$mode" = sync ]; then
   [ "${n:-0}" -eq 0 ] || die "archived ~/.config/ai/env exports DISABLE_TELEMETRY (breaks rc roles): fix env, yadm encrypt, commit, push, rerun"
   refresh_excludes
   say "decrypt"
-  decrypt_stream | tar xf - -C "$HOME" || die "decrypt failed (passphrase or archive changed upstream?)"
+  decrypt_stream 2>/dev/null | tar xf - -C "$HOME" || die "decrypt failed (passphrase or archive changed upstream?)"
   pass=""
   load_env   # env and env.local may have changed with the decrypt
 fi
@@ -430,9 +500,11 @@ check_pass() {
   openssl "${o[@]}" -in "$local_archive" -pass fd:3 3< <(printf '%s\n' "$pass") 2>/dev/null | tar tf - >/dev/null 2>&1
 }
 
-if [ "$mode" = sync ]; then
+if [ "$mode" = sync ] && [ "$(yadm config yadm.cipher)" = gpg ]; then
+  echo "cipher gpg: every host decrypts with its own key, no passphrase"
+elif [ "$mode" = sync ]; then
   [ -f "$local_archive" ] || { echo "no local archive at $local_archive to check the passphrase" >&2; exit 1; }
-  [ "$(yadm config yadm.cipher)" = openssl ] || { echo "local yadm.cipher is not openssl" >&2; exit 1; }
+  [ "$(yadm config yadm.cipher)" = openssl ] || { echo "local yadm.cipher is neither gpg nor openssl" >&2; exit 1; }
   if [ -n "$pass_fd" ]; then
     IFS= read -r pass <&"$pass_fd" || true
     check_pass || { echo "passphrase from fd $pass_fd does not decrypt the local archive" >&2; exit 1; }
