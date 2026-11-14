@@ -32,14 +32,25 @@ usage() {
   cat <<EOF
 Usage: ${0##*/} [options] [host ...]
 
-Runs on each host: source ~/.config/ai/env, yadm pull --ff-only (with the untracked
-.ssh/authorized_keys fix), decrypt, yadm perms, yadm alt, chmod 600 on rendered configs.
+Runs on each host: source ~/.config/ai/env, fetch, check the local changes, fast-forward
+to origin (with the untracked .ssh/authorized_keys fix), decrypt, yadm perms, yadm alt,
+chmod 600 on rendered configs.
+
+Local changes in tracked files:
+  - files the incoming commits do not touch: kept as they are, the pull goes ahead
+  - note files (.agents/session-handoff.md) the incoming commits change too: stashed,
+    pulled, both versions kept (upstream text, then the local additions), committed, pushed
+  - any other file the incoming commits change too: the host stops before changing
+    anything and prints the commands to resolve it; nothing is discarded or forced
+
+Exit status: 0 all OK, 1 a host failed, 2 usage, 3 done with warnings (e.g. push failed).
 
 Hosts (default all): ${HOSTS[*]}
 
 Options:
   -n, --dry-run          no changes, no passphrase: check reachability and each host's
-                         yadm state (fetch --dry-run, status, cipher, archive)
+                         yadm state (fetch of remote-tracking refs, local changes and
+                         how the sync would treat them, cipher, archive)
   -s, --skip HOST        leave HOST out (repeatable)
   -u, --skip-unreachable report hosts that do not answer as SKIP instead of FAIL
       --no-decrypt       pull and alt only, no passphrase needed
@@ -56,7 +67,8 @@ EOF
 read -r -d '' HOST_SCRIPT <<'HOST_EOF' || true
 set -uo pipefail
 mode=${1:?mode}
-shift
+alias_name=${2:?ssh alias}
+shift 2
 chmod_list=("$@")
 pass=""
 if [ "$mode" = sync ]; then
@@ -64,7 +76,6 @@ if [ "$mode" = sync ]; then
   [ -n "$pass" ] || { echo "FAIL: no passphrase on stdin"; exit 2; }
 fi
 exec </dev/null
-trap 'pass=""' EXIT
 
 host=$(hostname -s 2>/dev/null || hostname)
 say() { printf '  [%s] %s\n' "$host" "$*"; }
@@ -77,8 +88,36 @@ command -v openssl >/dev/null || die "openssl not installed"
 data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/yadm"
 repo="$data_dir/repo.git"
 archive="$data_dir/archive"
+yadm_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/yadm/config"
 encrypt_list="${XDG_CONFIG_HOME:-$HOME/.config}/yadm/encrypt"
 [ -d "$repo" ] || die "no yadm repo at $repo"
+
+# Plain git on the yadm repo. Every `yadm <git command>` ends with an automatic `yadm alt`
+# (yadm 3.3 sets CHANGES_POSSIBLE for all git pass-through commands), which re-renders the
+# templates at 0644 and, without ~/.config/ai/env, with blank secrets. Only the explicit
+# `yadm alt` and `yadm perms` steps below go through yadm.
+g() { git --git-dir="$repo" --work-tree="$HOME" "$@"; }
+cfg() { git config --file "$yadm_cfg" "$@" 2>/dev/null; }
+
+tmpd=""
+on_exit() {
+  pass=""
+  [ -n "$tmpd" ] && rm -rf "$tmpd"
+  # Whatever happened, rendered configs must not stay world-readable.
+  local f
+  for f in "${chmod_list[@]}"; do
+    [ -e "$HOME/$f" ] && chmod 600 "$HOME/$f"
+  done
+}
+trap on_exit EXIT
+
+# Tracked note files that several hosts edit. A local edit that collides with an incoming
+# change is stashed, the pull runs, and both versions are kept (union merge, upstream text
+# first, then the local additions); the merge is committed and pushed. Any other locally
+# changed file that the incoming commits also change stops this host.
+note_files=(.agents/session-handoff.md)
+in_arr() { local x=$1 y; shift; for y in "$@"; do [ "$x" = "$y" ] && return 0; done; return 1; }
+qlist() { local out="" f; for f in "$@"; do out+=" $(printf '%q' "$f")"; done; printf '%s' "${out# }"; }
 
 load_env() {
   # Templates render secrets from this file; without it `yadm alt` writes blanks.
@@ -94,11 +133,11 @@ load_env() {
 
 openssl_opts() {
   local cipher name
-  cipher=$(yadm config yadm.cipher)
+  cipher=$(cfg yadm.cipher)
   [ "${cipher:-gpg}" = openssl ] || die "yadm.cipher is '${cipher:-gpg}', only openssl is supported"
-  name=$(yadm config yadm.openssl-ciphername)
+  name=$(cfg yadm.openssl-ciphername)
   ossl=(enc -d "-${name:-aes-256-cbc}" -salt)
-  if [ "$(yadm config --bool yadm.openssl-old)" = true ]; then
+  if [ "$(cfg --bool yadm.openssl-old)" = true ]; then
     ossl+=(-md md5)
   else
     ossl+=(-pbkdf2 -iter 100000 -md sha512)
@@ -110,7 +149,7 @@ decrypt_stream() { openssl "${ossl[@]}" 3< <(printf '%s\n' "$pass"); }
 
 refresh_excludes() {
   # Same block `yadm decrypt` maintains in info/exclude.
-  [ "$(yadm config --bool yadm.auto-exclude)" = false ] && return 0
+  [ "$(cfg --bool yadm.auto-exclude)" = false ] && return 0
   [ -e "$encrypt_list" ] || return 0
   local excl="$repo/info/exclude" tmp
   tmp=$(mktemp "$repo/info/exclude.XXXXXX") || die "mktemp in $repo/info failed"
@@ -122,48 +161,157 @@ refresh_excludes() {
   mv -f "$tmp" "$excl" || { rm -f "$tmp"; die "updating $excl failed"; }
 }
 
+blocked() {
+  local q
+  q=$(qlist "$@")
+  say "FAIL: local changes in files that the incoming commits change too: $*"
+  say "  Nothing was changed on this host. Look at the changes and decide, then rerun"
+  say "  yadm-sync-all $alias_name:"
+  say "    ssh $alias_name"
+  say "    . ~/.config/ai/env && cd ~ && yadm diff -- $q"
+  say "    keep them on top of origin: yadm stash push -- $q && yadm pull --ff-only && yadm stash pop"
+  say "      (on a conflict: edit the files, yadm add -- $q, yadm stash drop; then commit and push)"
+  say "    or commit them first: yadm commit -m 'chore: local changes on $host' -- $q && yadm pull --no-rebase && yadm push"
+  exit 1
+}
+
+# Fast-forward to upstream; handles the known untracked .ssh/authorized_keys collision.
+ff_merge() {
+  local out
+  if out=$(g merge --ff-only "$up" 2>&1); then merge_out=$out; return 0; fi
+  if grep -q 'untracked working tree files would be overwritten' <<<"$out" &&
+     grep -q '\.ssh/authorized_keys' <<<"$out"; then
+    say "untracked .ssh/authorized_keys blocks the merge: taking $up's copy"
+    cp -p .ssh/authorized_keys .ssh/authorized_keys.pre-yadm-sync || { merge_out="backup of authorized_keys failed"; return 1; }
+    g checkout "$up" -- .ssh/authorized_keys || { merge_out="checkout of authorized_keys failed"; return 1; }
+    if out=$(g merge --ff-only "$up" 2>&1); then
+      say "previous authorized_keys kept as ~/.ssh/authorized_keys.pre-yadm-sync"
+      merge_out=$out; return 0
+    fi
+  fi
+  merge_out=$out
+  return 1
+}
+
+# Union-merge the stashed local versions of the note files into the freshly merged ones.
+merge_notes() {
+  local f rc merged=()
+  tmpd=$(mktemp -d "$data_dir/sync-notes.XXXXXX") || die "mktemp in $data_dir failed"
+  for f in "${notes[@]}"; do
+    if ! g cat-file -e "HEAD:$f" 2>/dev/null; then
+      die "$f was deleted upstream; your local version stays in the stash ($stash): yadm stash show -p"
+    fi
+    if ! { g show "$old:$f" >"$tmpd/base" && g show "$stash:$f" >"$tmpd/local" && g show "HEAD:$f" >"$tmpd/new"; }; then
+      die "reading the versions of $f failed; your local version stays in the stash ($stash)"
+    fi
+    git merge-file --union -p "$tmpd/new" "$tmpd/base" "$tmpd/local" >"$tmpd/merged"; rc=$?
+    [ "$rc" -lt 128 ] || die "git merge-file failed on $f; your local version stays in the stash ($stash)"
+    if cmp -s "$tmpd/merged" "$tmpd/new"; then
+      say "$f: the local edits are already upstream"
+      continue
+    fi
+    cat "$tmpd/merged" >"$HOME/$f" || die "writing $f failed; your local version stays in the stash ($stash)"
+    g add -- "$f" || die "yadm add $f failed; your local version stays in the stash ($stash)"
+    merged+=("$f")
+    say "$f: kept both versions (upstream text, then the local additions)"
+  done
+  if [ ${#merged[@]} -gt 0 ]; then
+    g commit -q -m "docs(agents): keep local notes from $host after yadm-sync-all" -- "${merged[@]}" ||
+      die "commit failed; merged files are staged, your local version stays in the stash ($stash)"
+    say "committed $(g rev-parse --short HEAD)"
+  fi
+  # Drop exactly the stash entry this run made.
+  if [ "$(g rev-parse -q --verify 'stash@{0}')" = "$stash" ]; then
+    g stash drop -q || say "WARN: could not drop stash $stash (harmless: yadm stash list)"
+  else
+    say "WARN: stash order changed, $stash left in place (yadm stash list)"
+  fi
+  if [ ${#merged[@]} -gt 0 ]; then
+    if out=$(g push -q origin "HEAD:${up#*/}" 2>&1); then
+      say "pushed to $up"
+    else
+      say "WARN: push failed, the merge commit stays local: $out"
+      say "  later: ssh $alias_name, then . ~/.config/ai/env && cd ~ && yadm pull --rebase && yadm push"
+      warn=1
+    fi
+  fi
+}
+
+warn=0
+up=$(g rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || up=origin/master
+[ -n "$up" ] || up=origin/master
+[ "$mode" = check ] || load_env
+say "branch: $(g rev-parse --abbrev-ref HEAD 2>/dev/null) -> $up, cipher: $(cfg yadm.cipher)"
 if [ "$mode" = check ]; then
-  say "branch: $(yadm rev-parse --abbrev-ref HEAD 2>/dev/null), cipher: $(yadm config yadm.cipher)"
   if [ -f "$archive" ]; then say "archive: present"; else say "archive: MISSING"; fi
   if [ -r "$HOME/.config/ai/env" ]; then say "env: present"; else say "env: MISSING"; fi
-  if out=$(yadm fetch --dry-run origin 2>&1); then
-    if [ -n "$out" ]; then say "fetch would bring new commits"; else say "fetch: up to date with origin"; fi
-  else
-    die "fetch --dry-run failed: $out"
-  fi
-  dirty=$(yadm status --porcelain --untracked-files=no | wc -l)
-  say "locally modified tracked files: $dirty"
-  if [ -e .ssh/authorized_keys ] && ! yadm ls-files --error-unmatch .ssh/authorized_keys >/dev/null 2>&1; then
-    say "untracked .ssh/authorized_keys: pull will need the checkout fix"
-  fi
-  say "OK (dry run, nothing changed)"
-  exit 0
 fi
 
-load_env
+# Fetch only updates the remote-tracking refs, also in the dry run.
+out=$(g fetch -q origin 2>&1) || die "yadm fetch failed: $out"
+behind=$(g rev-list --count "HEAD..$up") || die "cannot compare HEAD with $up"
+ahead=$(g rev-list --count "$up..HEAD")
+mapfile -t dirty < <(g diff --name-only HEAD --)
+mapfile -t incoming < <(g diff --name-only "HEAD...$up" --)
+notes=() blockers=() kept=()
+for f in "${dirty[@]}"; do
+  if in_arr "$f" "${incoming[@]}"; then
+    if in_arr "$f" "${note_files[@]}"; then notes+=("$f"); else blockers+=("$f"); fi
+  else
+    kept+=("$f")
+  fi
+done
+
+say "upstream: $behind new commit(s), $ahead local commit(s) not on $up"
+[ ${#dirty[@]} -eq 0 ] && say "no local changes in tracked files"
+[ ${#kept[@]} -eq 0 ] || say "local changes kept as they are (incoming commits do not touch them): ${kept[*]}"
+[ ${#notes[@]} -eq 0 ] || say "local note edits that collide with incoming ones (stash, pull, keep both): ${notes[*]}"
+untracked_keys=0
+if [ -e .ssh/authorized_keys ] && ! g ls-files --error-unmatch .ssh/authorized_keys >/dev/null 2>&1; then
+  untracked_keys=1
+fi
+[ ${#blockers[@]} -eq 0 ] || blocked "${blockers[@]}"
+if [ "$ahead" -gt 0 ] && [ "$behind" -gt 0 ]; then
+  die "local commits diverge from $up, a fast-forward is impossible. Look: yadm log --oneline $up..HEAD; then yadm pull --rebase && yadm push"
+fi
+
+if [ "$mode" = check ]; then
+  [ "$untracked_keys" = 1 ] && say "untracked .ssh/authorized_keys: the merge may need the checkout fix"
+  say "OK (dry run: only remote-tracking refs were fetched)"
+  exit 0
+fi
 
 # Fail on a wrong passphrase before anything changes.
 if [ "$mode" = sync ]; then
   [ -f "$archive" ] || die "no archive at $archive"
   openssl_opts
-  decrypt_stream | tar tf - >/dev/null 2>&1 || die "archive does not decrypt with this passphrase"
+  decrypt_stream 2>/dev/null | tar tf - >/dev/null 2>&1 || die "archive does not decrypt with this passphrase"
 fi
 
-say "yadm pull --ff-only"
-if ! out=$(yadm pull --ff-only 2>&1); then
-  if grep -q 'untracked working tree files would be overwritten' <<<"$out" &&
-     grep -q '\.ssh/authorized_keys' <<<"$out"; then
-    say "untracked .ssh/authorized_keys blocks the pull: taking origin/master's copy"
-    cp -p .ssh/authorized_keys .ssh/authorized_keys.pre-yadm-sync || die "backup of authorized_keys failed"
-    yadm fetch origin >/dev/null 2>&1 || die "yadm fetch failed"
-    yadm checkout origin/master -- .ssh/authorized_keys || die "checkout of authorized_keys failed"
-    out=$(yadm pull --ff-only 2>&1) || die "yadm pull failed after the fix: $out"
-    say "previous authorized_keys kept as ~/.ssh/authorized_keys.pre-yadm-sync"
-  else
-    die "yadm pull failed: $out"
+if [ "$behind" -eq 0 ]; then
+  say "already up to date with $up"
+else
+  old=$(g rev-parse HEAD)
+  stash=""
+  if [ ${#notes[@]} -gt 0 ]; then
+    g stash push -q -m "yadm-sync-all: local notes on $host" -- "${notes[@]}" || die "yadm stash of ${notes[*]} failed"
+    stash=$(g rev-parse -q --verify refs/stash) || die "stash entry not found after yadm stash"
+    say "stashed local notes as $stash"
   fi
+  say "merge --ff-only $up"
+  if ! ff_merge; then
+    if [ -n "$stash" ]; then
+      if g stash pop -q; then
+        say "local notes restored from the stash"
+      else
+        say "WARN: stash pop failed, your notes are in $stash (yadm stash list)"
+      fi
+    fi
+    die "fast-forward failed: $merge_out"
+  fi
+  say "$(printf '%s' "$merge_out" | grep -v '^ ' | tail -n 1)"
+  [ -n "$stash" ] && merge_notes
 fi
-say "$(printf '%s' "$out" | tail -n 1)"
 
 if [ "$mode" = sync ]; then
   # The pull may have brought a new archive or encrypt list.
@@ -178,15 +326,16 @@ if [ "$mode" = sync ]; then
   say "decrypt"
   decrypt_stream | tar xf - -C "$HOME" || die "decrypt failed (passphrase or archive changed upstream?)"
   pass=""
-  yadm perms || die "yadm perms failed"
   load_env   # env and env.local may have changed with the decrypt
 fi
 
+yadm perms || die "yadm perms failed"
 say "yadm alt"
 yadm alt >/dev/null || die "yadm alt failed"
 for f in "${chmod_list[@]}"; do
   [ -e "$HOME/$f" ] && { chmod 600 "$HOME/$f" || die "chmod 600 $f failed"; }
 done
+if [ "$warn" = 1 ]; then say "DONE with warnings"; exit 3; fi
 say "OK"
 HOST_EOF
 # ---------------------------------------------------------------------------------------
@@ -277,7 +426,7 @@ quoted_chmod=$(printf '%q ' "${CHMOD_600[@]}")
 for h in "${targets[@]}"; do
   echo "== $h"
   if [ "$h" = "$local_host" ]; then
-    run=(bash -c "$HOST_SCRIPT" yadm-sync-host "$mode" "${CHMOD_600[@]}")
+    run=(bash -c "$HOST_SCRIPT" yadm-sync-host "$mode" "$h" "${CHMOD_600[@]}")
   else
     if ! ssh "${SSH_OPTS[@]}" "$h" true </dev/null >/dev/null 2>&1; then
       if [ "$skip_unreachable" = 1 ]; then
@@ -287,13 +436,19 @@ for h in "${targets[@]}"; do
       fi
       continue
     fi
-    run=(ssh "${SSH_OPTS[@]}" "$h" "bash -c $quoted_script yadm-sync-host $mode $quoted_chmod")
+    run=(ssh "${SSH_OPTS[@]}" "$h" "bash -c $quoted_script yadm-sync-host $mode $h $quoted_chmod")
   fi
+  rc_h=0
   if [ "$mode" = sync ]; then
-    if printf '%s\n' "$pass" | "${run[@]}"; then result[$h]=OK; else result[$h]=FAIL; fi
+    printf '%s\n' "$pass" | "${run[@]}" || rc_h=$?
   else
-    if "${run[@]}" </dev/null; then result[$h]=OK; else result[$h]=FAIL; fi
+    "${run[@]}" </dev/null || rc_h=$?
   fi
+  case $rc_h in
+    0) result[$h]=OK ;;
+    3) result[$h]=WARN ;;
+    *) result[$h]=FAIL ;;
+  esac
 done
 
 cleanup
@@ -303,6 +458,6 @@ echo "Summary ($mode):"
 rc=0
 for h in "${targets[@]}"; do
   printf '  %-10s %s\n' "$h" "${result[$h]}"
-  [ "${result[$h]}" = FAIL ] && rc=1
+  case ${result[$h]} in FAIL) rc=1 ;; WARN) [ "$rc" = 0 ] && rc=3 ;; esac
 done
 exit "$rc"
