@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # yadm-reencrypt [--changed] [--no-push]: encrypt the yadm archive to every public key in
 # ~/.config/yadm/recipients, check that this device's key decrypts it to the files on disk,
-# commit archive and recipients, push. Needs no passphrase, so agents may run it.
+# commit archive, recipients and the yadm config (cipher, recipient list), push. Needs no passphrase, so agents may run it.
 # Guard against rolling secrets back: refuses unless this device is level with origin and its
 # decrypted files equal the current archive; --changed allows deliberate secret edits (the
 # differing files are listed). Plain git throughout: `yadm <git cmd>` would trigger yadm alt.
@@ -51,10 +51,10 @@ count=$(gpg --list-packets "$archive" 2>/dev/null | grep -c 'pubkey enc packet')
 echo "archive: $n files, $count recipients (${#fprs[@]} keys listed)"
 [ "$count" -eq ${#fprs[@]} ] || die "recipient count mismatch"
 
-g add -- .local/share/yadm/archive "$dir"
+g add -- .local/share/yadm/archive "$dir" .config/yadm/config
 if g diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
 what="re-encrypt the archive to ${#fprs[@]} gpg keys"
 [ ${#diffs[@]} -gt 0 ] && what="$what (changed: ${#diffs[@]} file(s))"
-g commit -q -m "chore(yadm): $what" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- .local/share/yadm/archive "$dir"
+g commit -q -m "chore(yadm): $what" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -- .local/share/yadm/archive "$dir" .config/yadm/config
 echo "committed $(g rev-parse --short HEAD)"
 [ "$push" = 1 ] && { g push -q origin HEAD || die "push failed: the commit stays local"; echo "pushed"; }
