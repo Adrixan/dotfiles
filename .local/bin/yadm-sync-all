@@ -40,6 +40,8 @@ Local changes in tracked files:
   - files the incoming commits do not touch: kept as they are, the pull goes ahead
   - note files (.agents/session-handoff.md) the incoming commits change too: stashed,
     pulled, both versions kept (upstream text, then the local additions), committed, pushed
+  - note files the incoming commits untrack (the home handoff since 2026-11-14, now synced
+    by the Syncthing folder agents-home): the local copy stays as an ignored file
   - any other file the incoming commits change too: the host stops before changing
     anything and prints the commands to resolve it; nothing is discarded or forced
 
@@ -111,10 +113,13 @@ on_exit() {
 }
 trap on_exit EXIT
 
-# Tracked note files that several hosts edit. A local edit that collides with an incoming
-# change is stashed, the pull runs, and both versions are kept (union merge, upstream text
-# first, then the local additions); the merge is committed and pushed. Any other locally
-# changed file that the incoming commits also change stops this host.
+# Note files that several hosts edit. While tracked: a local edit that collides with an
+# incoming change is stashed, the pull runs, and both versions are kept (union merge, upstream
+# text first, then the local additions); the merge is committed and pushed. When the incoming
+# commits untrack one (as on 2026-11-14 for the home handoff, which now syncs through the
+# Syncthing folder agents-home, ansible ai_workstation agents_handoff.yml), the host keeps its
+# local copy as an ignored file instead of letting the pull delete it. Any other locally changed
+# file that the incoming commits also change stops this host.
 note_files=(.agents/session-handoff.md)
 in_arr() { local x=$1 y; shift; for y in "$@"; do [ "$x" = "$y" ] && return 0; done; return 1; }
 qlist() { local out="" f; for f in "$@"; do out+=" $(printf '%q' "$f")"; done; printf '%s' "${out# }"; }
@@ -196,10 +201,11 @@ ff_merge() {
 # Union-merge the stashed local versions of the note files into the freshly merged ones.
 merge_notes() {
   local f rc merged=()
-  tmpd=$(mktemp -d "$data_dir/sync-notes.XXXXXX") || die "mktemp in $data_dir failed"
+  [ -n "$tmpd" ] || tmpd=$(mktemp -d "$data_dir/sync-notes.XXXXXX") || die "mktemp in $data_dir failed"
   for f in "${notes[@]}"; do
     if ! g cat-file -e "HEAD:$f" 2>/dev/null; then
-      die "$f was deleted upstream; your local version stays in the stash ($stash): yadm stash show -p"
+      say "$f: untracked upstream, the local version stays as an untracked file"
+      continue
     fi
     if ! { g show "$old:$f" >"$tmpd/base" && g show "$stash:$f" >"$tmpd/local" && g show "HEAD:$f" >"$tmpd/new"; }; then
       die "reading the versions of $f failed; your local version stays in the stash ($stash)"
@@ -266,6 +272,14 @@ say "upstream: $behind new commit(s), $ahead local commit(s) not on $up"
 [ ${#dirty[@]} -eq 0 ] && say "no local changes in tracked files"
 [ ${#kept[@]} -eq 0 ] || say "local changes kept as they are (incoming commits do not touch them): ${kept[*]}"
 [ ${#notes[@]} -eq 0 ] || say "local note edits that collide with incoming ones (stash, pull, keep both): ${notes[*]}"
+# Note files the incoming commits untrack: back them up so the merge cannot delete them.
+leaving=()
+for f in "${note_files[@]}"; do
+  if g cat-file -e "HEAD:$f" 2>/dev/null && ! g cat-file -e "$up:$f" 2>/dev/null && [ -f "$HOME/$f" ]; then
+    leaving+=("$f")
+  fi
+done
+[ ${#leaving[@]} -eq 0 ] || say "untracked upstream, the local copy stays: ${leaving[*]}"
 untracked_keys=0
 if [ -e .ssh/authorized_keys ] && ! g ls-files --error-unmatch .ssh/authorized_keys >/dev/null 2>&1; then
   untracked_keys=1
@@ -293,6 +307,14 @@ if [ "$behind" -eq 0 ]; then
 else
   old=$(g rev-parse HEAD)
   stash=""
+  if [ ${#leaving[@]} -gt 0 ]; then
+    tmpd=$(mktemp -d "$data_dir/sync-notes.XXXXXX") || die "mktemp in $data_dir failed"
+    for f in "${leaving[@]}"; do
+      if ! { mkdir -p "$tmpd/keep/$(dirname "$f")" && cp -p "$HOME/$f" "$tmpd/keep/$f"; }; then
+        die "backup of $f failed (nothing changed yet)"
+      fi
+    done
+  fi
   if [ ${#notes[@]} -gt 0 ]; then
     g stash push -q -m "yadm-sync-all: local notes on $host" -- "${notes[@]}" || die "yadm stash of ${notes[*]} failed"
     stash=$(g rev-parse -q --verify refs/stash) || die "stash entry not found after yadm stash"
@@ -310,6 +332,15 @@ else
     die "fast-forward failed: $merge_out"
   fi
   say "$(printf '%s' "$merge_out" | grep -v '^ ' | tail -n 1)"
+  for f in "${leaving[@]}"; do
+    if [ ! -e "$HOME/$f" ]; then
+      if ! { mkdir -p "$(dirname "$HOME/$f")" && cp -p "$tmpd/keep/$f" "$HOME/$f"; }; then
+        keep=$tmpd; tmpd=""   # the EXIT trap must not delete the only copy
+        die "restoring $f failed; the local copy is in $keep/keep/$f"
+      fi
+      say "$f: local copy restored as an untracked file"
+    fi
+  done
   [ -n "$stash" ] && merge_notes
 fi
 
