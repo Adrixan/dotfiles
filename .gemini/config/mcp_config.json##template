@@ -187,7 +187,19 @@
     "eur-lex": {"serverUrl": "http://127.0.0.1:8790/servers/eur-lex/mcp", "disabled": false},
     "youtube-transcript": {"serverUrl": "http://127.0.0.1:8790/servers/youtube-transcript/mcp", "disabled": false},
     "thunderbird": {"serverUrl": "http://127.0.0.1:8790/servers/thunderbird/mcp", "disabled": false},
-    "garmin": {"serverUrl": "http://127.0.0.1:8790/servers/garmin/mcp", "disabledTools": ["upload_course"], "disabled": false}
+    "garmin": {"serverUrl": "http://127.0.0.1:8790/servers/garmin/mcp", "disabledTools": ["upload_course"], "disabled": false},
+    "ptsd": {"serverUrl": "http://127.0.0.1:8790/servers/ptsd/mcp", "disabled": false},
+    "file-accountant": {"serverUrl": "http://127.0.0.1:8790/servers/file-accountant/mcp", "disabled": false}
 {% endif %}
+    ,
+    "newspaper-testground": {
+      "command": "ssh",
+      "args": [
+        "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30",
+        "ubuntu@testground.code-alongsi.de",
+        "cd ~/nexcloud-offline-newspaper && exec ~/.local/bin/uv run --quiet offline-newspaper-mcp --vault-path /home/ubuntu/news_vault --allow-write"
+      ],
+      "disabled": false
+    }
   }
 }
