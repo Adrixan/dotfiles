@@ -45,6 +45,7 @@ German lyrics are the default. German works naturally in punk, hardcore, Neue De
 - Hook: a short phrase from the assignment itself, ideally its core sentence ("Wenn du nicht bezahlst, bist du das Produkt").
 - Round brackets for gang or answer vocals; call-and-response makes terms stick.
 - Spell numbers, keys, abbreviations and file names the way they should be sung ("Steuerung C", "Pe-De-Eff", "U-R-L").
+- Suno moderation (it rejected "Lies das Datenblatt" v1 and accepted v2, 2026-11-15): never spell an abbreviation phonetically when the spelling forms a loaded acronym (SSD as "Es-Es-De" reads as SS; same for SA, KZ, NS); leave such abbreviations as written. No trademarked names, not even phonetic ("U-Es-Be", "Ha-De-Emm-I"): describe what the thing does. Avoid words with a violent meaning in German German even when harmless in Austrian ("angreifen" for touching: use "anfassen"). Details: `Music/Wissen/Suno.md`, section Moderation.
 - Terms exactly as the material uses them, so students recognise them in the worksheet.
 
 ## 6. Suno instructions
@@ -52,6 +53,7 @@ German lyrics are the default. German works naturally in punk, hardcore, Neue De
 Same block every time:
 - Styles field full and compact version, each with its character count (count with Python, never estimate).
 - Exclude styles (Schlager list, slow tempo, half-time, fade-out, genre opposites).
+- No genre jargon in Styles or performance tags that is also a slur or insult in English ("skank beat": write "fast hardcore punk beat").
 - Vocal gender, Weirdness (usually 25 to 35 %), Style influence (80 to 90 %), Audio influence (not used), Song title.
 - Iteration tips: discard versions with a soft start, fixes for tempo drift and mumbled key terms, target length 2:45 to 3:30.
 - A ranked table of three style directions (energy, how well German works, Schlager risk, estimated Suno reliability marked as untested) with a one-paragraph rationale.
