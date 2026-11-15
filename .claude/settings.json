@@ -43,6 +43,18 @@
           }
         ]
       }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/rc-rewake",
+            "asyncRewake": true,
+            "timeout": 2100
+          }
+        ]
+      }
     ]
   },
   "enableWorkflows": true,

@@ -18,15 +18,20 @@
 set -uo pipefail
 
 CLAUSE="This is not an approval: if you were waiting for Peter's decision, keep waiting."
-REWAKE_MESSAGE="continue: resume the task the usage limit interrupted."
-REWAKE_INTERVAL_MIN=30
-REWAKE_JITTER_SEC=120
-REWAKE_MAX=24
-REWAKE_ERRORS="rate_limit"
-REWAKE_DRY_RUN=0
+# Precedence: environment, then the config file, then the defaults below.
+vars=(REWAKE_MESSAGE REWAKE_INTERVAL_MIN REWAKE_JITTER_SEC REWAKE_MAX REWAKE_ERRORS REWAKE_DRY_RUN)
+declare -A from_env=()
+for v in "${vars[@]}"; do [[ -v $v ]] && from_env[$v]=${!v}; done
 conf="${REWAKE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-rc/rewake.env}"
 # shellcheck source=/dev/null
 [[ -r $conf ]] && . "$conf"
+for v in "${!from_env[@]}"; do printf -v "$v" '%s' "${from_env[$v]}"; done
+: "${REWAKE_MESSAGE:=continue: resume the task the usage limit interrupted.}"
+: "${REWAKE_INTERVAL_MIN:=30}"
+: "${REWAKE_JITTER_SEC:=120}"
+: "${REWAKE_MAX:=24}"
+: "${REWAKE_ERRORS:=rate_limit}"
+: "${REWAKE_DRY_RUN:=0}"
 state_root="${XDG_STATE_HOME:-$HOME/.local/state}/claude-rc/rewake"
 
 log() { logger -t rc-rewake -- "$*" 2>/dev/null || printf 'rc-rewake: %s\n' "$*" >&2; }
