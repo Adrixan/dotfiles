@@ -80,7 +80,13 @@ busy-session guards.
   [--description "…"] [--brief -] [up options]` starts the role that serves `Projects/<Name>` (name case-insensitive,
   e.g. `educator` for Prof. Aufner), else creates the role `project-<slug>` (label "Project: <Name>",
   research plugin unless `--plugins` says otherwise); an unknown name creates the folder with that layout
-  first. The folder inherits the trust of `Projects/` (accepted 2026-11-03). `rc project --list` lists the
+  first. Project homes (2026-11-16): a name listed in `~/sync/ai/claude-rc/project-roles.list` ("<name or alias>
+  = <role>", shared; plus `RC_PROJECT_ROLES` in rc.env and the names of `RC_REMOTE_ROLES`; compared by slug, so
+  case, spaces and dots do not matter) starts that role instead, forwarded over SSH with the brief when it is
+  remote: `rc project "Prof. Aufner"` = `rc up educator` on edu-micro; no local `project-<slug>` role or folder
+  is ever created for it. `rc up <role> --brief -` queues a brief where an rc start hook hands it over (code,
+  research, trip, vault project folders); a running role or one without such a hook gets "brief not queued"
+  (SendMessage). The folder inherits the trust of `Projects/` (accepted 2026-11-03). `rc project --list` lists the
   folders with role (`-` = no own role yet; the Projects role serves those) and last activity. Code stays
   in `~/code`, linked from the project's `Wissen/Code.md`.
 - Code projects, any number in parallel: `rc code <project>` creates and starts the role `code-<project>`
