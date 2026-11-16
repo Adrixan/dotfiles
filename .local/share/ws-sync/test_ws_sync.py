@@ -246,6 +246,25 @@ class PackageTests(Base):
         self.assertTrue(any(i.text.startswith("steam:") and i.fix for i in it))
 
 
+class AnsibleTests(Base):
+    def ans(self, **over) -> dict:
+        d = {"present": True, "head": "h2", "head_time": 0, "branch": "master", "hosts_sha": "x", "hosts_mtime": 0,
+             "stamp": {"ok": True, "head": "h1", "hosts_sha": "x", "roles": ["ai_workstation"]}, "topgrade": {},
+             "topgrade_timer": False, "changed_since_stamp": []}
+        d.update(over)
+        return d
+
+    def test_docs_only_change_needs_no_role_run(self):
+        c = self.coord(a=host_data("alpha", ansible=self.ans()))
+        self.assertEqual(c.ansible_due(c.me), "")
+
+    def test_role_file_change_or_hosts_change_is_due(self):
+        c = self.coord(a=host_data("alpha", ansible=self.ans(changed_since_stamp=["roles/x/tasks/main.yml"])))
+        self.assertTrue(c.ansible_due(c.me))
+        c = self.coord(a=host_data("alpha", ansible=self.ans(hosts_sha="y")))
+        self.assertTrue(c.ansible_due(c.me))
+
+
 class LeaseAndTimerTests(Base):
     def test_roles_on_both_machines_warn(self):
         a = host_data("alpha")

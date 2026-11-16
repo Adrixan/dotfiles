@@ -384,9 +384,17 @@ def c_ansible(repo: Path) -> dict:
         f = tp.read_text().split()
         if len(f) >= 2 and f[0].isdigit():
             topgrade = {"epoch": int(f[0]), "result": f[1]}
+    head = git_in(repo, "rev-parse", "HEAD").stdout.strip()
+    relevant: list[str] | None = None
+    if stamp.get("head") and stamp["head"] != head:
+        r = git_in(repo, "diff", "--name-only", stamp["head"], head)
+        if r.returncode == 0:
+            # Notes and docs do not change what a role run does.
+            relevant = [f for f in r.stdout.split() if not (f.startswith(".agents/") or f.endswith(".md"))]
     return {
         "present": True,
-        "head": git_in(repo, "rev-parse", "HEAD").stdout.strip(),
+        "head": head,
+        "changed_since_stamp": relevant,
         "head_time": int(git_in(repo, "log", "-1", "--format=%ct").stdout.strip() or 0),
         "branch": git_in(repo, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip(),
         "hosts_sha": hashlib.sha256(hosts.read_bytes()).hexdigest() if hosts.exists() else "",
@@ -1056,8 +1064,8 @@ class Coordinator:
         if not roles:
             return ""
         s = a.get("stamp") or {}
-        if s.get("ok") and s.get("head") == a["head"] and s.get("hosts_sha") == a["hosts_sha"] \
-                and sorted(s.get("roles", [])) == roles:
+        same_code = s.get("head") == a["head"] or a.get("changed_since_stamp") == []
+        if s.get("ok") and same_code and s.get("hosts_sha") == a["hosts_sha"] and sorted(s.get("roles", [])) == roles:
             return ""
         tg = a.get("topgrade") or {}
         if a.get("topgrade_timer") and tg.get("result") == "ok" and set(roles) <= set(h.cfg.get("nightly_roles", [])) \
