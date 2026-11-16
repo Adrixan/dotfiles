@@ -528,7 +528,8 @@ quoted_chmod=$(printf '%q ' "${CHMOD_600[@]}")
 
 for h in "${targets[@]}"; do
   echo "== $h"
-  if [ "$h" = "$local_host" ]; then
+  # YADM_SYNC_SELF names this machine's SSH alias when it differs from the hostname (xps -> xps13).
+  if [ "$h" = "$local_host" ] || [ "$h" = "${YADM_SYNC_SELF:-}" ]; then
     run=(bash -c "$HOST_SCRIPT" yadm-sync-host "$mode" "$h" "${CHMOD_600[@]}")
   else
     if ! ssh "${SSH_OPTS[@]}" "$h" true </dev/null >/dev/null 2>&1; then

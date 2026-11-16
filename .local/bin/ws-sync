@@ -1,0 +1,1677 @@
+#!/usr/bin/env python3
+"""ws-sync: keep the two workstations (schulpc and xps13) aligned and hand the rc roles over.
+
+Runs on either machine and finds the peer in its config. Modes:
+  status (default)  read-only: collect both machines, list every difference, record the check
+  sync              close the gaps both ways (only what differs; --dry-run shows the plan)
+  handoff           sync, move the takeover lease and the running roles to the other machine,
+                    with a content barrier so the transcripts and handoff notes arrive first
+  sync --auto       unattended run (user timer): user-level steps only, no root, no pushes
+
+Config (private, Syncthing): ~/sync/ai/ws-sync/config.toml. State: ~/sync/ai/ws-sync/state/
+(per-host manifests, package baseline), ~/.local/state/ws-sync/ (greeting stamp, Ansible stamp,
+lock). Needs only python3 (3.11+), ssh, git and the tools it orchestrates; no agent.
+
+Transports it orchestrates (it never replaces them): yadm-sync-all (dotfiles, secrets archive),
+git remotes (~/code), rc sync-confs and the workstation lease, Syncthing (checked, barrier),
+uv tools, Flatpak, zypper, Ansible role runs. Secrets never leave a machine: the archive check
+compares hashes in memory on each host and reports file names only.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import fnmatch
+import hashlib
+import io
+import json
+import os
+import re
+import shlex
+import socket
+import subprocess
+import sys
+import tarfile
+import time
+import tomllib
+import urllib.request
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from pathlib import Path
+
+VERSION = "1.0"
+HOME = Path.home()
+CONFIG = Path(os.environ.get("WS_SYNC_CONFIG", HOME / "sync/ai/ws-sync/config.toml"))
+LOCAL_STATE = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "ws-sync"
+GENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"}
+SELF = Path(__file__).resolve()
+
+EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_DRIFT, EXIT_UNREACHABLE = 0, 1, 2, 3, 4
+
+
+def short_host() -> str:
+    return socket.gethostname().split(".")[0]
+
+
+def run(cmd: list[str] | str, *, timeout: int = 120, input: str | None = None, env: dict | None = None,
+        cwd: str | Path | None = None) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=input,
+                              env=env or GENV, cwd=cwd, shell=isinstance(cmd, str))
+    except FileNotFoundError as e:
+        return subprocess.CompletedProcess(cmd, 127, "", str(e))
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, "", f"timed out after {timeout} s")
+
+
+def out(cmd: list[str] | str, **kw) -> str:
+    r = run(cmd, **kw)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def match_any(name: str, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatchcase(name, p) for p in patterns)
+
+
+def atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".syncthing.{path.name}.ws-sync.tmp")  # Syncthing ignores .syncthing.*.tmp
+    tmp.write_text(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def ago(epoch: float) -> str:
+    s = int(time.time() - epoch)
+    if s < 90:
+        return f"{s} s ago"
+    if s < 5400:
+        return f"{s // 60} min ago"
+    if s < 172800:
+        return f"{s // 3600} h ago"
+    return f"{s // 86400} d ago"
+
+
+# ----------------------------------------------------------------------------------------------
+# Collectors: run on each host (locally in-process, remotely as `python3 -I - collect`).
+
+def c_packages() -> dict:
+    names = out(["rpm", "-qa", "--qf", "%{NAME}\n"]).split()
+    auto = []
+    p = Path("/var/lib/zypp/AutoInstalled")
+    if p.exists():
+        auto = [x for x in p.read_text().split() if not x.startswith("#")]
+    repos = []
+    xml = out(["zypper", "--no-refresh", "-x", "lr", "-u"], timeout=60)
+    if xml:
+        try:
+            for r in ET.fromstring(xml).iter("repo"):
+                url = (r.findtext("url") or "").strip()
+                repos.append({"alias": r.get("alias"), "enabled": r.get("enabled") == "1", "url": url})
+        except ET.ParseError:
+            pass
+    return {"installed": sorted(set(names) - {"gpg-pubkey"}), "auto": sorted(set(auto)), "repos": repos}
+
+
+def c_flatpak() -> dict:
+    apps = {}
+    for line in out(["flatpak", "list", "--app", "--columns=application,installation,origin"]).splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            apps[parts[0]] = {"installation": parts[1], "origin": parts[2]}
+    return apps
+
+
+def c_uv() -> dict:
+    tools = {}
+    tdir = out(["uv", "tool", "dir"])
+    versions = {}
+    for line in out(["uv", "tool", "list"]).splitlines():
+        m = re.match(r"^(\S+) v(\S+)", line)
+        if m:
+            versions[m.group(1)] = m.group(2)
+    if tdir:
+        for rec in sorted(Path(tdir).glob("*/uv-receipt.toml")):
+            try:
+                t = tomllib.loads(rec.read_text()).get("tool", {})
+            except (tomllib.TOMLDecodeError, OSError):
+                continue
+            name = rec.parent.name
+            tools[name] = {"requirements": t.get("requirements", []), "python": t.get("python"),
+                           "overrides": bool(t.get("overrides")), "version": versions.get(name, "")}
+    return tools
+
+
+def c_docker() -> dict:
+    if run(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=20).returncode != 0:
+        return {"available": False}
+    cont = {}
+    for line in out(["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Image}}\t{{.State}}"]).splitlines():
+        n, img, st = (line.split("\t") + ["", "", ""])[:3]
+        cont[n] = {"image": img, "state": st}
+    imgs = sorted(set(out(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"]).split()))
+    return {"available": True, "containers": cont, "images": imgs}
+
+
+def c_timers() -> list[str]:
+    names = []
+    for scope, prefix in ((["--user"], "user:"), ([], "system:")):
+        for line in out(["systemctl", *scope, "list-units", "--type=timer", "--all", "--plain", "--no-legend"]).splitlines():
+            f = line.split()
+            if f and f[0].endswith(".timer") and len(f) >= 3 and f[2] == "active":
+                names.append(prefix + f[0])
+    return sorted(set(names))
+
+
+def git_in(repo: Path, *args: str, timeout: int = 120) -> subprocess.CompletedProcess:
+    return run(["git", "-C", str(repo), *args], timeout=timeout)
+
+
+def c_code(code_dir: Path) -> dict:
+    repos = {}
+    excl_file = HOME / ".config/code-sync/exclude"
+    exclude = excl_file.read_text().split() if excl_file.exists() else []
+    for g in sorted(code_dir.glob("*/.git")):
+        r = g.parent
+        refs = git_in(r, "for-each-ref", "--format=%(refname:short)\t%(objectname)\t%(upstream:short)\t"
+                      "%(upstream:track,nobracket)", "refs/heads").stdout
+        branches = {}
+        for line in refs.splitlines():
+            name, sha, up, track = (line.split("\t") + ["", "", "", ""])[:4]
+            a = re.search(r"ahead (\d+)", track)
+            b = re.search(r"behind (\d+)", track)
+            br = {"sha": sha, "up": up, "ahead": int(a.group(1)) if a else 0,
+                  "behind": int(b.group(1)) if b else 0, "gone": "gone" in track}
+            if not up:
+                br["unpushed"] = bool(git_in(r, "rev-list", "-n1", name, "--not", "--remotes").stdout.strip())
+            branches[name] = br
+        dirty = [x for x in git_in(r, "status", "--porcelain").stdout.splitlines() if x]
+        repos[r.name] = {
+            "origin": git_in(r, "remote", "get-url", "origin").stdout.strip(),
+            "current": git_in(r, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip(),
+            "default": git_in(r, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").stdout.strip()
+            .removeprefix("origin/"),
+            "dirty": len(dirty), "dirty_files": [x[3:] for x in dirty[:8]],
+            "stash": len(git_in(r, "stash", "list").stdout.splitlines()),
+            "branches": branches,
+        }
+    return {"repos": repos, "exclude": exclude}
+
+
+YADM_REPO = HOME / ".local/share/yadm/repo.git"
+YADM_ARCHIVE_PATH = ".local/share/yadm/archive"
+
+
+def yg(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
+    return run(["git", f"--git-dir={YADM_REPO}", f"--work-tree={HOME}", *args], timeout=timeout)
+
+
+def c_yadm(fetch: bool = False) -> dict:
+    """yadm state plus the secrets check: archive members (at origin after a fetch) against the local
+    files, in memory; reports names only."""
+    if not YADM_REPO.exists():
+        return {"present": False}
+    res: dict = {"present": True}
+    if fetch:
+        f = yg("fetch", "--quiet", "origin", timeout=90)
+        res["fetch_ok"] = f.returncode == 0
+    res["head"] = yg("rev-parse", "HEAD").stdout.strip()
+    res["origin"] = yg("rev-parse", "-q", "--verify", "refs/remotes/origin/master").stdout.strip()
+    track = yg("rev-list", "--left-right", "--count", "HEAD...refs/remotes/origin/master").stdout.split()
+    res["ahead"], res["behind"] = (int(track[0]), int(track[1])) if len(track) == 2 else (0, 0)
+    res["dirty"] = [x[3:] for x in yg("status", "--porcelain", "-uno").stdout.splitlines() if x]
+    cfg = HOME / ".config/yadm/config"
+    res["cipher"] = out(["git", "config", "--file", str(cfg), "yadm.cipher"]) if cfg.exists() else ""
+    res["secrets"] = archive_check(res["origin"] or "HEAD") if res["cipher"] == "gpg" else {"checked": False}
+    return res
+
+
+def archive_check(rev: str) -> dict:
+    blob = subprocess.run(["git", f"--git-dir={YADM_REPO}", "show", f"{rev}:{YADM_ARCHIVE_PATH}"],
+                          capture_output=True, env=GENV, timeout=60)
+    if blob.returncode != 0:
+        return {"checked": False, "error": "no archive in yadm"}
+    dec = subprocess.run(["gpg", "--batch", "--quiet", "--decrypt"], input=blob.stdout, capture_output=True,
+                         timeout=60)
+    if dec.returncode != 0:
+        return {"checked": False, "error": "archive does not decrypt with this host's key"}
+    ctime = int(yg("log", "-1", "--format=%ct", rev, "--", YADM_ARCHIVE_PATH).stdout.strip() or 0)
+    members, missing, newer_local, older_local = 0, [], [], []
+    with tarfile.open(fileobj=io.BytesIO(dec.stdout), mode="r:") as tf:
+        for m in tf.getmembers():
+            if not m.isfile():
+                continue
+            members += 1
+            data = tf.extractfile(m).read()
+            p = HOME / m.name
+            if not p.exists():
+                missing.append(m.name)
+                continue
+            try:
+                same = hashlib.sha256(p.read_bytes()).digest() == hashlib.sha256(data).digest()
+            except OSError:
+                same = False
+            if not same:
+                (newer_local if p.stat().st_mtime > ctime else older_local).append(m.name)
+    dec = None  # drop the plaintext
+    return {"checked": True, "members": members, "missing": missing, "newer_local": newer_local,
+            "older_local": older_local, "archive_time": ctime}
+
+
+def c_rc() -> dict:
+    d = HOME / ".config/claude-rc"
+    confs = {}
+    for p in sorted(d.glob("*.conf")):
+        confs[p.stem] = hashlib.sha256(p.read_bytes()).hexdigest()[:12]
+    running = []
+    for line in out([str(HOME / ".local/bin/rc"), "ls", "--running"], timeout=60).splitlines():
+        m = re.search(r"\(([^)]+)\):\s*(\d+) sess", line)
+        if m:
+            running.append({"role": m.group(1), "sessions": int(m.group(2))})
+    lease_tool = "/usr/local/libexec/workstation-lease"
+    lease = out([lease_tool, "status", "--cached"], timeout=30) if os.access(lease_tool, os.X_OK) else ""
+    holds = run([lease_tool, "check"], timeout=30).returncode == 0 if lease else False
+    return {"confs": confs, "running": running, "lease": lease, "holds_lease": holds}
+
+
+def c_mcp() -> dict:
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8790/status", timeout=5) as r:
+            return {"up": True, "servers": json.load(r).get("server_instances", {})}
+    except (OSError, ValueError):
+        return {"up": False, "servers": {}}
+
+
+def syncthing_api() -> tuple[str, str] | None:
+    for p in (HOME / ".local/state/syncthing/config.xml", HOME / ".config/syncthing/config.xml"):
+        if p.exists():
+            gui = ET.parse(p).getroot().find("gui")
+            if gui is None:
+                return None
+            scheme = "https" if gui.get("tls") == "true" else "http"
+            return f"{scheme}://{gui.findtext('address')}", gui.findtext("apikey") or ""
+    return None
+
+
+def st_get(path: str, method: str = "GET"):
+    api = syncthing_api()
+    if not api:
+        raise OSError("no Syncthing config")
+    req = urllib.request.Request(api[0] + path, method=method, headers={"X-API-Key": api[1]})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        body = r.read()
+        return json.loads(body) if body else None
+
+
+def c_syncthing() -> dict:
+    try:
+        folders = st_get("/rest/config/folders")
+        devices = {d["deviceID"]: d.get("name", "") for d in st_get("/rest/config/devices")}
+        conns = st_get("/rest/system/connections").get("connections", {})
+        myid = st_get("/rest/system/status").get("myID", "")
+    except (OSError, ValueError) as e:
+        return {"up": False, "error": str(e)[:200]}
+    res = {}
+    for f in folders:
+        try:
+            s = st_get(f"/rest/db/status?folder={f['id']}")
+        except (OSError, ValueError):
+            s = {}
+        res[f["id"]] = {"label": f.get("label", ""), "path": f.get("path", ""), "paused": f.get("paused", False),
+                        "type": f.get("type", ""), "state": s.get("state", "?"), "need": s.get("needFiles", 0),
+                        "errors": s.get("errors", 0) + s.get("pullErrors", 0)}
+    return {"up": True, "folders": res,
+            "connected": sorted(devices.get(i, i[:7]) for i, c in conns.items() if c.get("connected") and i != myid)}
+
+
+TOOLS = {
+    "claude": ["claude", "--version"], "node": ["node", "--version"], "uv": ["uv", "--version"],
+    "python3": ["python3", "--version"], "ansible": ["ansible", "--version"], "yadm": ["yadm", "--version"],
+    "git": ["git", "--version"], "docker": ["docker", "--version"], "opencode": ["opencode", "--version"],
+    "agy": ["agy", "--version"], "syncthing": ["syncthing", "--version"], "zsh": ["zsh", "--version"],
+}
+
+
+def c_tools() -> dict:
+    """Versions as an interactive shell sees them (~/.local/bin first), plus the binary's path."""
+    import shutil
+    res = {}
+    path = f"{HOME}/.local/bin:{HOME}/.opencode/bin:{GENV.get('PATH', '')}"
+    path_env = {**GENV, "PATH": path}
+    for name, cmd in TOOLS.items():
+        exe = shutil.which(cmd[0], path=path)
+        r = run(cmd, timeout=20, env=path_env) if exe else subprocess.CompletedProcess(cmd, 127, "", "")
+        text = (r.stdout or r.stderr).strip().splitlines()
+        m = re.search(r"(\d+\.\d+(?:\.\d+)*)", text[0]) if r.returncode == 0 and text else None
+        res[name] = {"version": m.group(1) if m else "", "path": exe or ""}
+    return res
+
+
+def c_ansible(repo: Path) -> dict:
+    if not (repo / ".git").exists():
+        return {"present": False}
+    hosts = repo / "hosts"
+    stamp = {}
+    sp = LOCAL_STATE / "ansible.json"
+    if sp.exists():
+        try:
+            stamp = json.loads(sp.read_text())
+        except ValueError:
+            pass
+    topgrade = {}
+    tp = Path("/var/lib/topgrade-status")
+    if tp.exists():
+        f = tp.read_text().split()
+        if len(f) >= 2 and f[0].isdigit():
+            topgrade = {"epoch": int(f[0]), "result": f[1]}
+    return {
+        "present": True,
+        "head": git_in(repo, "rev-parse", "HEAD").stdout.strip(),
+        "head_time": int(git_in(repo, "log", "-1", "--format=%ct").stdout.strip() or 0),
+        "branch": git_in(repo, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip(),
+        "hosts_sha": hashlib.sha256(hosts.read_bytes()).hexdigest() if hosts.exists() else "",
+        "hosts_mtime": int(hosts.stat().st_mtime) if hosts.exists() else 0,
+        "stamp": stamp, "topgrade": topgrade,
+        "topgrade_timer": run(["systemctl", "is-enabled", "--quiet", "topgrade-nightly.timer"]).returncode == 0,
+    }
+
+
+def collect(cfg: dict, fetch_yadm: bool = False, sections: list[str] | None = None) -> dict:
+    code_dir = Path(os.path.expanduser(cfg.get("code", {}).get("dir", "~/code")))
+    ans_repo = Path(os.path.expanduser(cfg.get("ansible", {}).get("repo", "~/code/ansible-opensuse-server")))
+    t0 = time.time()
+    fns = {
+        "packages": c_packages, "flatpak": c_flatpak, "uv": c_uv, "docker": c_docker, "timers": c_timers,
+        "code": lambda: c_code(code_dir), "yadm": lambda: c_yadm(fetch_yadm), "rc": c_rc, "mcp": c_mcp,
+        "syncthing": c_syncthing, "tools": c_tools, "ansible": lambda: c_ansible(ans_repo),
+    }
+    data = {"host": short_host(), "time": int(t0), "version": VERSION}
+    for name, fn in fns.items():
+        if sections is None or name in sections:
+            data[name] = fn()
+    data["collect_s"] = round(time.time() - t0, 1)
+    return data
+
+
+# ----------------------------------------------------------------------------------------------
+# Host-side helpers that the coordinator runs on either machine (subcommands of this script).
+
+def h_code_refresh(args: argparse.Namespace) -> int:
+    """Push the allowed branches (phase push) or fetch and fast-forward (phase ff) in the given repos."""
+    code_dir = Path(os.path.expanduser(args.code_dir))
+    status = 0
+    for name in args.repos:
+        repo = code_dir / name
+        if not (repo / ".git").exists():
+            if args.phase == "clone" and args.url:
+                url = dict(u.split("=", 1) for u in args.url).get(name)
+                if url:
+                    r = run(["git", "clone", "--quiet", "--recurse-submodules", url, str(repo)], timeout=900)
+                    print(f"{name}: cloned" if r.returncode == 0 else f"{name}: clone failed: {r.stderr.strip()[:200]}")
+                    status |= r.returncode != 0
+            continue
+        if args.phase == "push":
+            status |= code_push(repo, args)
+        elif args.phase == "ff":
+            status |= code_ff(repo)
+    return EXIT_FAIL if status else EXIT_OK
+
+
+def code_push(repo: Path, args: argparse.Namespace) -> int:
+    if git_in(repo, "fetch", "--all", "--prune", "--quiet", timeout=180).returncode != 0:
+        print(f"{repo.name}: fetch failed")
+        return 1
+    default = git_in(repo, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").stdout.strip()
+    default = default.removeprefix("origin/")
+    refs = git_in(repo, "for-each-ref", "--format=%(refname:short)\t%(upstream:short)\t%(upstream:track,nobracket)",
+                  "refs/heads").stdout
+    bad = 0
+    def allowed(remote: str) -> bool:
+        url = git_in(repo, "remote", "get-url", "--push", remote).stdout.strip()
+        if match_any(url, args.push_remote):
+            return True
+        print(f"{repo.name}: {remote} ({url}) is not on the push list: not pushed (client or foreign repo)")
+        return False
+    for line in refs.splitlines():
+        b, up, track = (line.split("\t") + ["", "", ""])[:3]
+        if up:
+            if "ahead" not in track or "behind" in track or "gone" in track:
+                if "ahead" in track and "behind" in track:
+                    print(f"{repo.name}: {b} diverged from {up}: resolve by hand")
+                continue
+            if b == default and not args.push_default:
+                print(f"{repo.name}: {b} has unpushed commits (default branch; not pushed in this mode)")
+                continue
+            remote, _, rbranch = up.partition("/")
+            if not allowed(remote):
+                continue
+            r = git_in(repo, "push", "--quiet", remote, f"refs/heads/{b}:refs/heads/{rbranch}", timeout=900)
+        else:
+            if not git_in(repo, "rev-list", "-n1", b, "--not", "--remotes").stdout.strip():
+                continue
+            if not args.push_untracked:
+                print(f"{repo.name}: {b} exists only here (no upstream; ws-sync handoff pushes it)")
+                continue
+            if not allowed("origin"):
+                continue
+            r = git_in(repo, "push", "--quiet", "-u", "origin", f"refs/heads/{b}:refs/heads/{b}", timeout=900)
+        if r.returncode == 0:
+            print(f"{repo.name}: pushed {b}")
+        else:
+            print(f"{repo.name}: push of {b} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+            bad = 1
+    return bad
+
+
+def code_ff(repo: Path) -> int:
+    """Same rules as code-sync: fast-forward what loses nothing; the checked-out branch only when clean."""
+    if git_in(repo, "fetch", "--all", "--prune", "--quiet", timeout=180).returncode != 0:
+        print(f"{repo.name}: fetch failed")
+        return 1
+    dirty = bool(git_in(repo, "status", "--porcelain").stdout.strip())
+    current = git_in(repo, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip()
+    refs = git_in(repo, "for-each-ref", "--format=%(refname:short)\t%(upstream:short)\t%(upstream:track,nobracket)",
+                  "refs/heads").stdout
+    bad = 0
+    for line in refs.splitlines():
+        b, up, track = (line.split("\t") + ["", "", ""])[:3]
+        if not up or "behind" not in track or "ahead" in track or "gone" in track:
+            continue
+        if b == current:
+            if dirty:
+                print(f"{repo.name}: {b} behind {up}, not updated (uncommitted changes)")
+                continue
+            r = git_in(repo, "merge", "--ff-only", "--quiet", up)
+        else:
+            sha = git_in(repo, "rev-parse", up).stdout.strip()
+            r = git_in(repo, "update-ref", f"refs/heads/{b}", sha)
+        if r.returncode == 0:
+            print(f"{repo.name}: {b} fast-forwarded")
+        else:
+            print(f"{repo.name}: {b} fast-forward failed")
+            bad = 1
+    if (repo / ".gitmodules").exists() and not dirty:
+        git_in(repo, "submodule", "update", "--init", "--recursive", "--quiet", timeout=600)
+    return bad
+
+
+def h_barrier_hash(args: argparse.Namespace) -> int:
+    """Print {path: sha256} for files under the given paths changed in the last --window-min minutes
+    (or exactly the given --files, which may be missing here)."""
+    res: dict[str, str] = {}
+    cutoff = time.time() - args.window_min * 60
+    if args.files:
+        for f in args.files:
+            p = Path(os.path.expanduser(f))
+            res[f] = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else ""
+    for root in args.paths or []:
+        # "recent:<dir>": the window counts back from the newest file in that tree (a role's transcripts,
+        # however long ago it was last active), not from now.
+        recent = root.startswith("recent:")
+        base = Path(os.path.expanduser(root.removeprefix("recent:")))
+        if base.is_file():
+            cand = [base]
+        elif base.is_dir():
+            cand = [p for p in base.rglob("*") if p.is_file()]
+        else:
+            continue
+        if recent and cand:
+            try:
+                newest = max(p.stat().st_mtime for p in cand)
+            except OSError:
+                newest = time.time()
+            cutoff_here = newest - args.window_min * 60
+        else:
+            cutoff_here = cutoff
+        for p in cand:
+            n = p.name
+            if n.startswith(".syncthing.") or n == "bridge-pointer.json" or ".sync-conflict-" in n \
+                    or ".stversions" in p.parts or n.startswith("~syncthing~"):
+                continue
+            try:
+                if p.stat().st_mtime < cutoff_here:
+                    continue
+                key = "~/" + str(p.relative_to(HOME))
+                res[key] = hashlib.sha256(p.read_bytes()).hexdigest()
+            except (OSError, ValueError):
+                continue
+    print(json.dumps(res))
+    return EXIT_OK
+
+
+def h_st_scan(args: argparse.Namespace) -> int:
+    for fid in args.folders:
+        try:
+            st_get(f"/rest/db/scan?folder={fid}", method="POST")
+        except (OSError, ValueError) as e:
+            print(f"scan {fid}: {e}", file=sys.stderr)
+    return EXIT_OK
+
+
+def write_stamp(kind: str, fields: list[str]) -> None:
+    """~/.local/state/ws-sync/last: one line per kind, read by the shell greeting.
+    sync <epoch> <mode> <result> <peer> | ok <epoch> <mode> <peer> | check <epoch> <differences> <peer|unreachable>"""
+    p = LOCAL_STATE / "last"
+    lines = {}
+    if p.exists():
+        for line in p.read_text().splitlines():
+            if line.split():
+                lines[line.split()[0]] = line
+    lines[kind] = " ".join([kind, str(int(time.time()))] + [f.replace(" ", "_") for f in fields])
+    atomic_write(p, "".join(f"{lines[k]}\n" for k in ("sync", "ok", "check") if k in lines), 0o644)
+
+
+# ----------------------------------------------------------------------------------------------
+# Coordinator.
+
+@dataclass
+class Host:
+    name: str
+    ssh: str
+    local: bool
+    cfg: dict
+    timeout: int = 20
+    data: dict = field(default_factory=dict)
+
+    def ssh_cmd(self) -> list[str]:
+        LOCAL_STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        cm = LOCAL_STATE / "cm-%C"
+        return ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={self.timeout}", "-o", "ServerAliveInterval=15",
+                "-o", "ServerAliveCountMax=4", "-o", "ControlMaster=auto", "-o", f"ControlPath={cm}",
+                "-o", "ControlPersist=120", self.ssh]
+
+    def sh(self, script: str, *, env: bool = False, timeout: int = 600, stream: bool = False) -> subprocess.CompletedProcess:
+        prelude = 'export PATH="$HOME/.local/bin:/usr/local/bin:$PATH" GIT_OPTIONAL_LOCKS=0; '
+        if env:
+            prelude += 'if [ -r "$HOME/.config/ai/env" ]; then set -a; . "$HOME/.config/ai/env"; set +a; fi; '
+        full = prelude + script
+        cmd = ["bash", "-c", full] if self.local else [*self.ssh_cmd(), "bash -c " + shlex.quote(full)]
+        if stream:
+            try:
+                p = subprocess.run(cmd, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+                return subprocess.CompletedProcess(cmd, p.returncode, "", "")
+            except subprocess.TimeoutExpired:
+                return subprocess.CompletedProcess(cmd, 124, "", f"timed out after {timeout} s")
+        return run(cmd, timeout=timeout)
+
+    def py(self, *args: str, timeout: int = 600) -> subprocess.CompletedProcess:
+        """Run this script's host-side subcommand on the host (remote: the source travels on stdin)."""
+        if self.local:
+            return run([sys.executable, "-I", str(SELF), *args], timeout=timeout)
+        return run([*self.ssh_cmd(), "python3 -I - " + " ".join(shlex.quote(a) for a in args)],
+                   timeout=timeout, input=SELF.read_text())
+
+
+@dataclass
+class Item:
+    section: str
+    text: str
+    level: str = "drift"            # drift | warn | info
+    fix: str = ""                   # short description of the planned fix ("" = report only)
+
+
+class Coordinator:
+    def __init__(self, args: argparse.Namespace, cfg: dict):
+        self.args, self.cfg = args, cfg
+        self.mode = args.mode
+        self.auto = getattr(args, "auto", False)
+        self.dry = getattr(args, "dry_run", False)
+        me = short_host()
+        hosts = cfg.get("hosts", {})
+        if me not in hosts:
+            die(f"this machine ({me}) is not in {CONFIG} [hosts]; known: {', '.join(hosts) or 'none'}", EXIT_USAGE)
+        peers = [h for h in hosts if h != me]
+        peer = args.peer or (peers[0] if len(peers) == 1 else "")
+        if peer not in hosts or peer == me:
+            die(f"cannot pick the peer: use --peer ({', '.join(peers)})", EXIT_USAGE)
+        t = int(cfg.get("ssh", {}).get("connect_timeout", 20))
+        self.me = Host(me, hosts[me].get("ssh", me), True, hosts[me], t)
+        self.peer = Host(peer, hosts[peer].get("ssh", peer), False, hosts[peer], t)
+        self.items: list[Item] = []
+        self.failures: list[str] = []
+        self.steps = self._steps()
+        self.state_dir = Path(os.path.expanduser(cfg.get("state_dir", "~/sync/ai/ws-sync/state")))
+        self.lock_proc: subprocess.Popen | None = None
+
+    def _steps(self) -> list[str]:
+        all_steps = ["yadm", "code", "rc", "uv", "flatpak", "packages", "ansible"]
+        steps = self.cfg.get("auto", {}).get("steps", ["yadm", "code", "rc", "uv"]) if self.auto else all_steps
+        if self.args.only:
+            steps = [s for s in steps if s in self.args.only.split(",")]
+        if self.args.skip:
+            steps = [s for s in steps if s not in self.args.skip.split(",")]
+        return steps
+
+    # -- helpers --
+    def hosts(self) -> tuple[Host, Host]:
+        return self.me, self.peer
+
+    def other(self, h: Host) -> Host:
+        return self.peer if h is self.me else self.me
+
+    def only_on(self, section: str, host: str) -> list[str]:
+        return self.cfg.get(section, {}).get("only_on", {}).get(host, [])
+
+    def ignore(self, section: str) -> list[str]:
+        return self.cfg.get(section, {}).get("ignore", [])
+
+    def exempt(self, section: str, name: str, have: Host) -> bool:
+        """True when `name` (present on `have`) is not expected on the other host."""
+        return match_any(name, self.ignore(section)) or match_any(name, self.only_on(section, have.name))
+
+    def say(self, text: str) -> None:
+        print(text, flush=True)
+
+    def act(self, host: Host, desc: str, script: str, *, env: bool = False, timeout: int = 900,
+            stream: bool = False) -> bool:
+        tag = f"[{host.name}]"
+        if self.dry:
+            self.say(f"  would run {tag} {desc}")
+            return True
+        self.say(f"  {tag} {desc}")
+        r = host.sh(script, env=env, timeout=timeout, stream=stream)
+        text = (r.stdout + r.stderr).strip()
+        if text and not stream:
+            for line in text.splitlines()[-25:]:
+                self.say(f"    {line}")
+        if r.returncode != 0:
+            self.failures.append(f"{tag} {desc}: exit {r.returncode}")
+        return r.returncode == 0
+
+    def act_py(self, host: Host, desc: str, *args: str, timeout: int = 900) -> bool:
+        tag = f"[{host.name}]"
+        if self.dry:
+            self.say(f"  would run {tag} {desc}")
+            return True
+        self.say(f"  {tag} {desc}")
+        r = host.py(*args, timeout=timeout)
+        for line in (r.stdout + r.stderr).strip().splitlines()[-40:]:
+            self.say(f"    {line}")
+        if r.returncode != 0:
+            self.failures.append(f"{tag} {desc}: exit {r.returncode}")
+        return r.returncode == 0
+
+    # -- reachability, lock, collect --
+    def reach(self) -> bool:
+        r = run([*self.peer.ssh_cmd(), "true"], timeout=self.peer.timeout + 15)
+        if r.returncode != 0:
+            why = (r.stderr.strip().splitlines() or ["no answer"])[-1]
+            self.say(f"peer {self.peer.name} unreachable (ssh {self.peer.ssh}): {why}")
+            self.say(f"  check: is {self.peer.name} awake and online? `ssh {self.peer.ssh}` must work without a prompt "
+                     f"(Cloudflare tunnel, key in the agent).")
+            return False
+        return True
+
+    def lock(self) -> None:
+        LOCAL_STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.lock_fd = open(LOCAL_STATE / "lock", "w")
+        try:
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            die("another ws-sync run is active on this machine", EXIT_FAIL)
+
+    def lock_peer(self) -> bool:
+        """Hold the peer's lock for this run: a remote flock around `cat`, released when stdin closes."""
+        script = ('d="${XDG_STATE_HOME:-$HOME/.local/state}/ws-sync"; mkdir -p "$d" && chmod 700 "$d" && '
+                  'exec flock -n -E 75 "$d/lock" sh -c \'echo locked; exec cat >/dev/null\'')
+        self.lock_proc = subprocess.Popen([*self.peer.ssh_cmd(), script], stdin=subprocess.PIPE,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        line = self.lock_proc.stdout.readline().strip()
+        if line != "locked":
+            self.lock_proc.wait(timeout=30)
+            busy = self.lock_proc.returncode == 75
+            self.say(f"peer {self.peer.name}: " + ("another ws-sync run is active there" if busy
+                                                   else f"lock failed ({self.lock_proc.stderr.read().strip()[:200]})"))
+            self.lock_proc = None
+            return False
+        return True
+
+    def unlock_peer(self) -> None:
+        if self.lock_proc:
+            try:
+                self.lock_proc.stdin.close()
+                self.lock_proc.wait(timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                self.lock_proc.kill()
+
+    def collect_all(self, fetch_yadm: bool) -> bool:
+        self.me.data = collect(self.cfg, fetch_yadm)
+        extra = ["--fetch-yadm"] if fetch_yadm else []
+        r = self.peer.py("collect", *extra, timeout=600)
+        if r.returncode != 0:
+            self.say(f"collect on {self.peer.name} failed: {r.stderr.strip()[-400:]}")
+            return False
+        try:
+            self.peer.data = json.loads(r.stdout)
+        except ValueError:
+            self.say(f"collect on {self.peer.name}: unreadable answer")
+            return False
+        self.save_manifests()
+        return True
+
+    def save_manifests(self) -> None:
+        for h in self.hosts():
+            if h.data:
+                atomic_write(self.state_dir / f"{h.name}.json", json.dumps(h.data, indent=1, sort_keys=True))
+
+    def load_manifest(self, name: str) -> dict:
+        p = self.state_dir / f"{name}.json"
+        try:
+            return json.loads(p.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def baseline(self) -> dict:
+        try:
+            return json.loads((self.state_dir / "baseline.json").read_text())
+        except (OSError, ValueError):
+            return {}
+
+    # -- analysis (fills self.items, returns nothing) --
+    def analyse(self) -> None:
+        self.items = []
+        for fn in (self.a_lease, self.a_yadm, self.a_code, self.a_rc, self.a_uv, self.a_flatpak, self.a_packages,
+                   self.a_ansible, self.a_mcp, self.a_timers, self.a_docker, self.a_syncthing, self.a_tools):
+            try:
+                fn()
+            except Exception as e:  # one broken section must not hide the others
+                self.items.append(Item(fn.__name__[2:], f"analysis failed: {e!r}", "warn"))
+
+    def add(self, section: str, text: str, level: str = "drift", fix: str = "") -> None:
+        self.items.append(Item(section, text, level, fix))
+
+    def a_lease(self) -> None:
+        a, b = self.me.data["rc"], self.peer.data["rc"]
+        for h, d in ((self.me, a), (self.peer, b)):
+            if d["running"] and not d["holds_lease"]:
+                self.add("lease", f"{h.name} runs roles without holding the lease: "
+                         + ", ".join(r["role"] for r in d["running"]), "warn")
+        if a["running"] and b["running"]:
+            self.add("lease", "roles run on both machines at once", "warn")
+
+    def a_yadm(self) -> None:
+        for h in self.hosts():
+            y = h.data["yadm"]
+            if not y.get("present"):
+                self.add("yadm", f"{h.name}: no yadm repo", "warn")
+                continue
+            if y.get("behind"):
+                self.add("yadm", f"{h.name}: {y['behind']} commits behind origin", fix="yadm-sync-all")
+            if y.get("ahead"):
+                self.add("yadm", f"{h.name}: {y['ahead']} unpushed yadm commits",
+                         fix="yadm push" if not self.auto else "")
+            keep = self.cfg.get("yadm", {}).get("ignore_dirty", {}).get(h.name, [])
+            dirty = [f for f in y.get("dirty", []) if f != ".agents/session-handoff.md" and not match_any(f, keep)]
+            if dirty:
+                self.add("yadm", f"{h.name}: uncommitted yadm changes: {', '.join(dirty[:6])}", "warn")
+            s = y.get("secrets", {})
+            if not s.get("checked"):
+                self.add("secrets", f"{h.name}: archive not checked ({s.get('error', 'cipher is not gpg')})", "warn")
+                continue
+            if s["missing"]:
+                self.add("secrets", f"{h.name}: missing {', '.join(s['missing'])}", fix="decrypt")
+            if s["older_local"]:
+                self.add("secrets", f"{h.name}: older than the archive: {', '.join(s['older_local'])}", fix="decrypt")
+            vol, newer = self.split_volatile(s["newer_local"])
+            if vol:
+                self.add("secrets", f"{h.name}: rewritten by their tools since the last archive commit (kept "
+                         f"across decrypts): {', '.join(vol)}", "info")
+            if newer:
+                self.add("secrets", f"{h.name}: edited after the last archive commit, not encrypted yet: "
+                         f"{', '.join(newer)} (on {h.name}: yadm-reencrypt --changed; ws-sync will not "
+                         "decrypt over it)", "warn")
+
+    def split_volatile(self, files: list[str]) -> tuple[list[str], list[str]]:
+        volatile = self.cfg.get("secrets", {}).get("volatile", [])
+        return [f for f in files if match_any(f, volatile)], [f for f in files if not match_any(f, volatile)]
+
+    def a_code(self) -> None:
+        A, B = self.me.data["code"], self.peer.data["code"]
+        ignore = self.ignore("code")
+        for h, mine, theirs in ((self.me, A, B), (self.peer, B, A)):
+            o = self.other(h)
+            for name, r in mine["repos"].items():
+                if match_any(name, ignore):
+                    continue
+                if name not in theirs["repos"]:
+                    if name in theirs["exclude"] or match_any(name, self.only_on("code", h.name)):
+                        continue
+                    if r["origin"]:
+                        self.add("code", f"{name}: missing on {o.name}", fix=f"clone on {o.name}")
+                    else:
+                        self.add("code", f"{name}: on {h.name} only, without a remote", "warn")
+                    continue
+                if r["dirty"]:
+                    files = ", ".join(r["dirty_files"][:3]) + (" ..." if r["dirty"] > 3 else "")
+                    self.add("code", f"{name}: {r['dirty']} uncommitted on {h.name} ({files})", "warn")
+                if r["stash"]:
+                    self.add("code", f"{name}: {r['stash']} stash entries on {h.name}", "info")
+                for b, br in r["branches"].items():
+                    if br["up"] and br["ahead"] and br["behind"]:
+                        self.add("code", f"{name}: {b} diverged on {h.name}", "warn")
+                    elif br["up"] and br["ahead"]:
+                        default = b == r["default"]
+                        can = self.push_allowed(default, untracked=False) and self.remote_ok(r["origin"])
+                        foreign = "" if self.remote_ok(r["origin"]) else " (remote not on code.push_remotes: push by hand)"
+                        self.add("code", f"{name}: {b} {br['ahead']} unpushed on {h.name}{foreign}",
+                                 "warn" if foreign else "drift", fix=f"push from {h.name}" if can else "")
+                    elif not br["up"] and br.get("unpushed"):
+                        can = self.push_allowed(False, untracked=True) and self.remote_ok(r["origin"])
+                        self.add("code", f"{name}: {b} only on {h.name} (no upstream)",
+                                 "drift" if can else "warn", fix=f"push -u from {h.name}" if can else "")
+                    elif br["up"] and br["gone"]:
+                        self.add("code", f"{name}: {b} on {h.name}: upstream gone", "info")
+                    tr = theirs["repos"][name]
+                    tb = tr["branches"].get(b)
+                    if h is self.me and tb and tb["sha"] != br["sha"] and not br["ahead"] and not tb["ahead"] \
+                            and br["up"] and tb["up"]:
+                        blocked = [x.name for x, rr in ((h, r), (self.other(h), tr)) if rr["current"] == b and rr["dirty"]]
+                        if blocked:
+                            self.add("code", f"{name}: {b} differs between the machines; uncommitted changes on "
+                                     f"{', '.join(blocked)} block the fast-forward", "warn")
+                        else:
+                            self.add("code", f"{name}: {b} differs between the machines", fix="fetch and fast-forward")
+
+    def remote_ok(self, url: str) -> bool:
+        return match_any(url, self.cfg.get("code", {}).get("push_remotes", []))
+
+    def push_allowed(self, default: bool, untracked: bool) -> bool:
+        if self.auto:
+            return False
+        c = self.cfg.get("code", {})
+        if untracked:
+            return self.mode in c.get("push_untracked_in", ["handoff"])
+        if default:
+            return self.mode in c.get("push_default_branch_in", ["sync", "handoff"])
+        return self.mode in c.get("push_in", ["sync", "handoff"])
+
+    def a_rc(self) -> None:
+        A, B = self.me.data["rc"]["confs"], self.peer.data["rc"]["confs"]
+        for h, mine, theirs in ((self.me, A, B), (self.peer, B, A)):
+            for role in sorted(set(mine) - set(theirs)):
+                if not self.exempt("rc", role, h):
+                    self.add("rc", f"role {role}: conf only on {h.name}", fix="rc sync-confs")
+
+    def uv_spec(self, tool: dict) -> tuple[str, str]:
+        """(install argument, problem). Registry and local-directory requirements only."""
+        reqs = tool["requirements"]
+        if len(reqs) != 1 or tool.get("overrides"):
+            return "", "several requirements or overrides (Ansible-managed?)"
+        r = reqs[0]
+        if "git" in r or "url" in r:
+            return "", "git or URL source (Ansible-managed or by hand)"
+        if "directory" in r:
+            return r["directory"], ""
+        if "editable" in r:
+            return "--editable " + r["editable"], ""
+        spec = r.get("specifier", "")
+        if spec.startswith("=="):
+            return "", f"pinned {spec}"
+        extras = f"[{','.join(r['extras'])}]" if r.get("extras") else ""
+        return f"{r['name']}{extras}{spec}", ""
+
+    @staticmethod
+    def vkey(v: str) -> tuple:
+        return tuple(int(x) if x.isdigit() else -1 for x in re.split(r"[.\-+]", v or "0"))
+
+    def a_uv(self) -> None:
+        A, B = self.me.data["uv"], self.peer.data["uv"]
+        for h, mine, theirs in ((self.me, A, B), (self.peer, B, A)):
+            o = self.other(h)
+            for name, t in mine.items():
+                if self.exempt("uv", name, h):
+                    continue
+                spec, problem = self.uv_spec(t)
+                if name not in theirs:
+                    if problem:
+                        self.add("uv", f"{name}: missing on {o.name} ({problem})", "warn")
+                    else:
+                        self.add("uv", f"{name}: missing on {o.name}", fix=f"uv tool install on {o.name}")
+                    continue
+                if h is not self.me:
+                    continue
+                ot = theirs[name]
+                if t["version"] == ot["version"]:
+                    continue
+                older, newer = (h, o) if self.vkey(t["version"]) < self.vkey(ot["version"]) else (o, h)
+                odata = older.data["uv"][name]
+                ospec, oproblem = self.uv_spec(odata)
+                txt = f"{name}: {older.name} {odata['version']} < {newer.name} {newer.data['uv'][name]['version']}"
+                if oproblem.startswith("pinned"):
+                    self.add("uv", f"{txt} ({oproblem} on {older.name})", fix=f"reinstall unpinned on {older.name}")
+                elif oproblem:
+                    self.add("uv", f"{txt} ({oproblem})", "warn")
+                elif ospec.startswith("--editable "):
+                    continue  # editable: the checkout is the version; the code step aligns it
+                elif ospec.startswith("/"):
+                    self.add("uv", txt, fix=f"reinstall from the checkout on {older.name}")
+                else:
+                    self.add("uv", txt, fix=f"uv tool upgrade on {older.name}")
+
+    def a_flatpak(self) -> None:
+        A, B = self.me.data["flatpak"], self.peer.data["flatpak"]
+        for h, mine, theirs in ((self.me, A, B), (self.peer, B, A)):
+            o = self.other(h)
+            for app, meta in mine.items():
+                if app not in theirs and not self.exempt("flatpak", app, h):
+                    self.add("flatpak", f"{app}: missing on {o.name}",
+                             fix="" if self.auto else f"flatpak install on {o.name}")
+
+    def requested(self, h: Host) -> set[str] | None:
+        """Packages a host asked for since the last baseline (None: unknown for this host)."""
+        p = h.data["packages"]
+        inst, auto = set(p["installed"]), set(p["auto"])
+        base = self.baseline().get("packages", {}).get(h.name)
+        if base is not None:
+            return inst - auto - set(base)
+        # No baseline yet: trust zypper's AutoInstalled only where it is maintained (most packages listed).
+        return inst - auto if len(auto) > 0.5 * max(len(inst), 1) else None
+
+    def a_packages(self) -> None:
+        ignore = self.ignore("packages")
+        base = self.baseline().get("packages", {})
+        for h in self.hosts():
+            o = self.other(h)
+            req = self.requested(h)
+            if req is None:
+                self.add("packages", f"{h.name}: no baseline and no usable AutoInstalled list: "
+                         "packages added there are not compared until the first sync writes the baseline", "info")
+                continue
+            have = set(o.data["packages"]["installed"])
+            for name in sorted(req - have):
+                if not self.exempt("packages", name, h):
+                    self.add("packages", f"{name}: on {h.name}, missing on {o.name}",
+                             fix="" if self.auto else f"zypper install on {o.name}")
+            if h.name in base:
+                gone = set(base[h.name]) - set(h.data["packages"]["installed"])
+                for name in sorted(gone):
+                    if not match_any(name, ignore) and name in have:
+                        self.add("packages", f"{name}: removed on {h.name} since the last sync, still on {o.name} "
+                                 f"(remove it there or add it to only_on)", "info")
+        urls = {h.name: {self.norm_url(r["url"]) for r in h.data["packages"]["repos"] if r["enabled"]}
+                for h in self.hosts()}
+        for h in self.hosts():
+            o = self.other(h)
+            for u in sorted(urls[h.name] - urls[o.name]):
+                if not match_any(u, self.cfg.get("packages", {}).get("repo_ignore", [])):
+                    self.add("repos", f"{u}: enabled on {h.name} only", "info")
+
+    @staticmethod
+    def norm_url(u: str) -> str:
+        return re.sub(r"^https?://", "", u.split("?")[0]).rstrip("/")
+
+    def ansible_due(self, h: Host) -> str:
+        a = h.data["ansible"]
+        if not a.get("present"):
+            return ""
+        roles = sorted(h.cfg.get("ansible_roles", []))
+        if not roles:
+            return ""
+        s = a.get("stamp") or {}
+        if s.get("ok") and s.get("head") == a["head"] and s.get("hosts_sha") == a["hosts_sha"] \
+                and sorted(s.get("roles", [])) == roles:
+            return ""
+        tg = a.get("topgrade") or {}
+        if a.get("topgrade_timer") and tg.get("result") == "ok" and set(roles) <= set(h.cfg.get("nightly_roles", [])) \
+                and tg.get("epoch", 0) > max(a["head_time"], a["hosts_mtime"]):
+            return ""
+        return "role run due (" + ("never run by ws-sync" if not s else "repo or hosts changed since the last run") + ")"
+
+    def a_ansible(self) -> None:
+        for h in self.hosts():
+            a = h.data["ansible"]
+            if not a.get("present"):
+                continue
+            if a.get("branch") not in ("master", ""):
+                self.add("ansible", f"{h.name}: repo on branch {a['branch']}", "warn")
+            why = self.ansible_due(h)
+            if why:
+                self.add("ansible", f"{h.name}: {', '.join(h.cfg.get('ansible_roles', []))}: {why}",
+                         fix="" if self.auto else f"ansible-playbook on {h.name}")
+
+    def a_mcp(self) -> None:
+        for h in self.hosts():
+            m = h.data["mcp"]
+            o = self.other(h)
+            if not m["up"]:
+                self.add("mcp", f"{h.name}: mcp-shared not answering on 127.0.0.1:8790", "warn")
+                continue
+            for name, st in m["servers"].items():
+                if st not in ("configured", "running", "ready"):
+                    self.add("mcp", f"{h.name}: {name} {st}", "warn")
+                if o.data["mcp"]["up"] and name not in o.data["mcp"]["servers"] and not self.exempt("mcp", name, h):
+                    self.add("mcp", f"{name}: served on {h.name} only (Ansible ai_workstation on {o.name}, "
+                             "or a requires_path missing there)")
+
+    def a_timers(self) -> None:
+        A, B = set(self.me.data["timers"]), set(self.peer.data["timers"])
+        for h, mine, theirs in ((self.me, A, B), (self.peer, B, A)):
+            for t in sorted(mine - theirs):
+                if not self.exempt("timers", t, h):
+                    self.add("timers", f"{t}: active on {h.name} only (Ansible, or add to timers.only_on)")
+
+    def a_docker(self) -> None:
+        A, B = self.me.data["docker"], self.peer.data["docker"]
+        if not A.get("available") or not B.get("available"):
+            for h, d in ((self.me, A), (self.peer, B)):
+                if not d.get("available"):
+                    self.add("docker", f"{h.name}: docker not available", "info")
+            return
+        for h, mine, theirs in ((self.me, A, B), (self.peer, B, A)):
+            for n, c in mine["containers"].items():
+                if n not in theirs["containers"] and not self.exempt("docker", n, h):
+                    self.add("docker", f"container {n} ({c['image']}): on {h.name} only")
+            if self.args.verbose:
+                for i in sorted(set(mine["images"]) - set(theirs["images"])):
+                    if not self.exempt("docker", i, h):
+                        self.add("docker", f"image {i}: on {h.name} only", "info")
+
+    def a_syncthing(self) -> None:
+        for h in self.hosts():
+            s = h.data["syncthing"]
+            o = self.other(h)
+            if not s.get("up"):
+                self.add("syncthing", f"{h.name}: REST API not reachable ({s.get('error', '')})", "warn")
+                continue
+            for fid, f in s["folders"].items():
+                lab = f["label"] or fid
+                if f["paused"]:
+                    self.add("syncthing", f"{h.name}: folder {lab} paused", "warn")
+                if f["errors"] or f["state"] == "error":
+                    self.add("syncthing", f"{h.name}: folder {lab}: {f['errors']} errors, state {f['state']}", "warn")
+                if f["need"]:
+                    self.add("syncthing", f"{h.name}: folder {lab}: {f['need']} files still to download", "info")
+                os_ = o.data["syncthing"]
+                if os_.get("up") and fid not in os_["folders"] and not self.exempt("syncthing", fid, h):
+                    self.add("syncthing", f"folder {lab} ({fid}) on {h.name} only")
+            if not s.get("connected"):
+                self.add("syncthing", f"{h.name}: no device connected", "warn")
+
+    def a_tools(self) -> None:
+        A, B = self.me.data["tools"], self.peer.data["tools"]
+        for t in sorted(set(A) | set(B)):
+            ta, tb = A.get(t) or {}, B.get(t) or {}
+            a, b = ta.get("version", ""), tb.get("version", "")
+            if a == b or match_any(t, self.ignore("tools")):
+                continue
+            if not a or not b:
+                h = self.me if a else self.peer
+                if not self.exempt("tools", t, h):
+                    self.add("tools", f"{t}: installed on {h.name} only")
+                continue
+            # A different major or minor release is drift; a patch release apart is a note (update timers).
+            level = "info" if a.split(".")[:2] == b.split(".")[:2] else "drift"
+            older = self.me if self.vkey(a) < self.vkey(b) else self.peer
+            self.add("tools", f"{t}: {self.me.name} {a} ({ta.get('path')}), {self.peer.name} {b} ({tb.get('path')}); "
+                     f"update on {older.name} (update-system, or check for a stale copy earlier in PATH)", level)
+
+    # -- report --
+    def report(self) -> tuple[int, int]:
+        sections: dict[str, list[Item]] = {}
+        for it in self.items:
+            sections.setdefault(it.section, []).append(it)
+        order = ["lease", "yadm", "secrets", "code", "rc", "uv", "flatpak", "packages", "repos", "ansible", "mcp",
+                 "timers", "docker", "syncthing", "tools"]
+        for s in order:
+            its = sections.get(s, [])
+            shown = [i for i in its if i.level != "info" or self.args.verbose]
+            info_n = len(its) - len(shown)
+            head = "ok" if not its else f"{len([i for i in its if i.level != 'info'])} differences" \
+                + (f", {len(its) - len([i for i in its if i.level != 'info'])} notes" if any(i.level == "info" for i in its) else "")
+            self.say(f"{s:<10} {head}" + (f" (-v shows {info_n} notes)" if info_n and not shown else ""))
+            for i in shown:
+                mark = {"warn": "!", "drift": "-", "info": "·"}[i.level]
+                self.say(f"  {mark} {i.text}" + (f"  [fix: {i.fix}]" if i.fix else ""))
+        drift = [i for i in self.items if i.level != "info"]
+        fixable = [i for i in drift if i.fix]
+        return len(drift), len(fixable)
+
+    def header(self) -> None:
+        rc_a, rc_b = self.me.data.get("rc", {}), self.peer.data.get("rc", {})
+        holder = self.me.name if rc_a.get("holds_lease") else self.peer.name if rc_b.get("holds_lease") else "nobody"
+        lease = rc_a.get("lease") or rc_b.get("lease") or "no lease"
+        self.say(f"ws-sync {VERSION} {self.mode}{' --auto' if self.auto else ''}{' --dry-run' if self.dry else ''}: "
+                 f"{self.me.name} <-> {self.peer.name} (ssh {self.peer.ssh})")
+        self.say(f"lease      {holder} holds it ({lease}); running roles: "
+                 f"{self.me.name} {len(rc_a.get('running', []))}, {self.peer.name} {len(rc_b.get('running', []))}")
+
+    # -- steps --
+    def step_yadm(self) -> None:
+        plan: dict[str, bool] = {}
+        keep: dict[str, list[str]] = {}
+        for h in self.hosts():
+            y = h.data["yadm"]
+            if not y.get("present"):
+                continue
+            s = y.get("secrets", {})
+            vol, newer = self.split_volatile(s.get("newer_local", []))
+            need = bool(y.get("behind") or s.get("missing") or s.get("older_local"))
+            if need:
+                plan[h.name] = not newer
+                if vol and not newer:
+                    keep[h.name] = vol
+        for h in self.hosts():
+            y = h.data["yadm"]
+            if y.get("ahead") and not y.get("behind") and not self.auto:
+                self.act(h, "yadm push (unpushed yadm commits)", "git --git-dir=$HOME/.local/share/yadm/repo.git push "
+                         "--quiet origin HEAD:master", timeout=180)
+                plan.setdefault(self.other(h).name, True)
+        if not plan:
+            self.say("  yadm: nothing to do")
+            return
+        # Volatile files (token caches) newer than the archive survive the decrypt: copied aside, restored.
+        kdir = "${XDG_STATE_HOME:-$HOME/.local/state}/ws-sync/keep"
+        for name, files in keep.items():
+            q = " ".join(shlex.quote(f) for f in files)
+            self.act(self.host_by(name), f"keep {', '.join(files)} across the decrypt",
+                     f'umask 077; mkdir -p "{kdir}" && cd "$HOME" && tar cf "{kdir}/volatile.tar" -- {q}', timeout=60)
+        groups: dict[bool, list[str]] = {}
+        for name, decrypt in plan.items():
+            groups.setdefault(decrypt, []).append(self.cfg["hosts"][name].get("ssh", name))
+        for decrypt, aliases in groups.items():
+            flags = "-u" + ("" if decrypt else " --no-decrypt")
+            # YADM_SYNC_SELF: this machine's alias runs locally (no SSH loop through its own tunnel).
+            self.act(self.me, f"yadm-sync-all {flags} {' '.join(aliases)}",
+                     f"YADM_SYNC_SELF={shlex.quote(self.me.ssh)} yadm-sync-all {flags} "
+                     f"{' '.join(shlex.quote(a) for a in aliases)}", env=True, timeout=900)
+        for name, files in keep.items():
+            self.act(self.host_by(name), f"restore {', '.join(files)}",
+                     f'cd "$HOME" && tar xpf "{kdir}/volatile.tar" && rm -f "{kdir}/volatile.tar"', timeout=60)
+
+    def step_code(self) -> None:
+        A, B = self.me.data["code"], self.peer.data["code"]
+        touched: set[str] = set()
+        clones: dict[str, dict[str, str]] = {self.me.name: {}, self.peer.name: {}}
+        for it in self.items:
+            if it.section != "code" or not it.fix:
+                continue
+            repo = it.text.split(":")[0]
+            if it.fix.startswith("clone on"):
+                tgt = it.fix.removeprefix("clone on ").strip()
+                src = A if tgt == self.peer.name else B
+                clones[tgt][repo] = src["repos"][repo]["origin"]
+            else:
+                touched.add(repo)
+        c = self.cfg.get("code", {})
+        code_dir = c.get("dir", "~/code")
+        for h in self.hosts():
+            if clones[h.name]:
+                urls = [f"--url={n}={u}" for n, u in clones[h.name].items()]
+                self.act_py(h, f"clone {', '.join(clones[h.name])}", "code-refresh", "--phase", "clone",
+                            "--code-dir", code_dir, *urls, *clones[h.name], timeout=1800)
+        if not touched:
+            self.say("  code: nothing to push or fast-forward")
+            return
+        repos = sorted(touched)
+        pd = self.push_allowed(True, False)
+        pu = self.push_allowed(False, True)
+        for h in self.hosts():
+            names = [r for r in repos if r in h.data["code"]["repos"]]
+            if not names:
+                continue
+            extra = (["--push-default"] if pd else []) + (["--push-untracked"] if pu else [])
+            extra += [f"--push-remote={g}" for g in c.get("push_remotes", [])]
+            if self.push_allowed(False, False):
+                self.act_py(h, f"push where needed ({len(names)} repos)", "code-refresh", "--phase", "push",
+                            "--code-dir", code_dir, *extra, *names, timeout=3600)
+        for h in self.hosts():
+            names = [r for r in repos if r in h.data["code"]["repos"]]
+            if names:
+                self.act_py(h, f"fetch and fast-forward ({len(names)} repos)", "code-refresh", "--phase", "ff",
+                            "--code-dir", code_dir, *names, timeout=1800)
+
+    def step_rc(self) -> None:
+        if any(i.section == "rc" and i.fix for i in self.items):
+            self.act(self.me, "rc sync-confs", "rc sync-confs", timeout=300)
+        else:
+            self.say("  rc: confs equal")
+
+    def step_uv(self) -> None:
+        did = False
+        for it in self.items:
+            if it.section != "uv" or not it.fix:
+                continue
+            name = it.text.split(":")[0]
+            if it.fix.startswith("uv tool install on"):
+                tgt = self.host_by(it.fix.split(" on ")[-1])
+                spec, _ = self.uv_spec(self.other(tgt).data["uv"][name])
+                if spec.startswith("--editable "):
+                    d = spec.removeprefix("--editable ")
+                    script = f"test -d {shlex.quote(d)} && uv tool install --quiet --editable {shlex.quote(d)}"
+                elif spec.startswith("/"):
+                    script = f"test -d {shlex.quote(spec)} && uv tool install --quiet {shlex.quote(spec)}"
+                else:
+                    script = f"uv tool install --quiet {shlex.quote(spec)}"
+            elif it.fix.startswith("reinstall unpinned on"):
+                tgt = self.host_by(it.fix.split(" on ")[-1])
+                r = tgt.data["uv"][name]["requirements"][0]
+                extras = f"[{','.join(r['extras'])}]" if r.get("extras") else ""
+                script = f"uv tool install --quiet --force {shlex.quote(r['name'] + extras)}"
+            elif it.fix.startswith("reinstall from the checkout on"):
+                tgt = self.host_by(it.fix.split(" on ")[-1])
+                spec, _ = self.uv_spec(tgt.data["uv"][name])
+                script = f"uv tool install --quiet --force --reinstall {shlex.quote(spec)}"
+            else:
+                tgt = self.host_by(it.fix.split(" on ")[-1])
+                script = f"uv tool upgrade --quiet {shlex.quote(name)}"
+            ok = self.act(tgt, f"{name}: {it.fix.split(' on ')[0]}", script, timeout=900)
+            unit = self.cfg.get("uv", {}).get("restart_units", {}).get(name)
+            if ok and unit:
+                self.act(tgt, f"restart {unit} (uses {name})", f"systemctl --user restart {shlex.quote(unit)}",
+                         timeout=300)
+            did = True
+        if not did:
+            self.say("  uv: nothing to do")
+
+    def host_by(self, name: str) -> Host:
+        return self.me if name == self.me.name else self.peer
+
+    def step_flatpak(self) -> None:
+        todo = [(i.text.split(":")[0], self.host_by(i.fix.split(" on ")[-1])) for i in self.items
+                if i.section == "flatpak" and i.fix]
+        if not todo:
+            self.say("  flatpak: nothing to do")
+        for app, tgt in todo:
+            src = self.other(tgt).data["flatpak"][app]
+            inst = "--user" if src["installation"] == "user" else "--system"
+            pre = "" if inst == "--user" else "sudo -n "
+            self.act(tgt, f"flatpak install {app}",
+                     f"{pre}flatpak install {inst} -y --noninteractive {shlex.quote(src['origin'])} {shlex.quote(app)}",
+                     timeout=1800)
+
+    def step_packages(self) -> None:
+        per: dict[str, list[str]] = {}
+        for i in self.items:
+            if i.section == "packages" and i.fix:
+                per.setdefault(i.fix.split(" on ")[-1], []).append(i.text.split(":")[0])
+        if not per:
+            self.say("  packages: nothing to install")
+        for name, pkgs in per.items():
+            h = self.host_by(name)
+            q = " ".join(shlex.quote(p) for p in pkgs)
+            # One transaction first; if zypper refuses it (a package not in this host's repos), one by one.
+            script = (f"sudo -n zypper --non-interactive install --no-recommends -- {q} || "
+                      f"{{ rc=0; for p in {q}; do sudo -n zypper --non-interactive install --no-recommends -- \"$p\" "
+                      f">/dev/null 2>&1 && echo \"installed $p\" || {{ echo \"failed: $p\"; rc=1; }}; done; exit $rc; }}")
+            self.act(h, f"zypper install {len(pkgs)} packages: {', '.join(pkgs[:12])}{' ...' if len(pkgs) > 12 else ''}",
+                     script, timeout=3600)
+
+    def step_ansible(self) -> None:
+        a_cfg = self.cfg.get("ansible", {})
+        repo = a_cfg.get("repo", "~/code/ansible-opensuse-server")
+        did = False
+        for h in self.hosts():
+            # The code step may have moved the repo: decide on fresh data.
+            r = h.py("collect", "--section", "ansible", timeout=120)
+            try:
+                h.data["ansible"] = json.loads(r.stdout)["ansible"]
+            except (ValueError, KeyError):
+                pass
+            if not self.ansible_due(h):
+                continue
+            roles = h.cfg.get("ansible_roles", [])
+            flags = " ".join(f"-e enable_{x}=true" for x in roles)
+            ok = self.act(h, f"ansible-playbook main.yml {flags} (minutes)",
+                          f"cd {repo} && ansible-playbook main.yml {flags} > >(awk '/PLAY RECAP/{{p=1}} "
+                          "p||/^(fatal|failed):/') 2>&1",
+                          env=True, timeout=int(a_cfg.get("timeout_s", 5400)))
+            did = True
+            if ok and not self.dry:
+                a = h.data["ansible"]
+                stamp = json.dumps({"ok": True, "head": a["head"], "hosts_sha": a["hosts_sha"],
+                                    "roles": sorted(roles), "time": int(time.time())})
+                h.py("stamp", "--kind", "none", "--ansible-json", stamp, timeout=120)
+        if not did:
+            self.say("  ansible: role runs up to date")
+
+    # -- baseline --
+    def write_baseline(self) -> None:
+        if self.dry:
+            return
+        base = self.baseline()
+        base.setdefault("packages", {})
+        for h in self.hosts():
+            base["packages"][h.name] = h.data["packages"]["installed"]
+        base["time"] = int(time.time())
+        atomic_write(self.state_dir / "baseline.json", json.dumps(base, indent=0, sort_keys=True))
+
+    def stamp_both(self, kind: str, fields_me: list[str], fields_peer: list[str] | None) -> None:
+        if self.dry:
+            return
+        write_stamp(kind, fields_me)
+        if fields_peer is not None:
+            self.peer.py("stamp", "--kind", kind, *fields_peer, timeout=60)
+
+    # -- modes --
+    def run_status(self) -> int:
+        if not self.reach():
+            self.offline_status()
+            write_stamp("check", ["?", "unreachable"])
+            return EXIT_UNREACHABLE
+        if not self.collect_all(fetch_yadm=self.args.fetch):
+            return EXIT_FAIL
+        self.header()
+        self.analyse()
+        drift, fixable = self.report()
+        self.say(f"\n{drift} differences, {fixable} with a fix in `ws-sync sync`"
+                 f"{' (yadm state from the last fetch; --fetch refreshes)' if not self.args.fetch else ''}")
+        write_stamp("check", [str(drift), self.peer.name])
+        self.peer.py("stamp", "--kind", "check", str(drift), self.me.name, timeout=60)
+        return EXIT_OK if drift == 0 else EXIT_DRIFT
+
+    def offline_status(self) -> None:
+        m = self.load_manifest(self.peer.name)
+        if m:
+            self.say(f"last known state of {self.peer.name}: {ago(m.get('time', 0))} "
+                     f"(manifest in {self.state_dir})")
+
+    def run_sync(self) -> int:
+        self.lock()
+        if not self.reach():
+            write_stamp("sync", [self.mode + ("-auto" if self.auto else ""), "unreachable", self.peer.name])
+            return EXIT_UNREACHABLE
+        if not self.lock_peer():
+            write_stamp("sync", [self.mode, "peer-busy", self.peer.name])
+            return EXIT_FAIL
+        try:
+            return self._sync_body()
+        finally:
+            self.unlock_peer()
+
+    def _sync_body(self, final_stamp: bool = True) -> int:
+        if not self.collect_all(fetch_yadm=True):
+            self.stamp_both("sync", [self.mode, "failed", self.peer.name], None)
+            return EXIT_FAIL
+        self.header()
+        self.analyse()
+        self.say("== before")
+        self.report()
+        self.say("== steps: " + ", ".join(self.steps))
+        for s in self.steps:
+            try:
+                getattr(self, f"step_{s}")()
+            except Exception as e:
+                self.failures.append(f"step {s}: {e!r}")
+                self.say(f"  step {s} failed: {e!r}")
+        if self.dry:
+            self.say("\n(dry run: nothing changed)")
+            return EXIT_OK
+        self.say("== after")
+        if not self.collect_all(fetch_yadm=False):
+            return EXIT_FAIL
+        self.analyse()
+        drift, fixable = self.report()
+        if "packages" in self.steps and not self.failures:
+            self.write_baseline()
+        result = "failed" if self.failures else ("ok" if drift == 0 else f"{drift}-left")
+        if final_stamp:
+            mode = self.mode + ("-auto" if self.auto else "")
+            self.stamp_both("sync", [mode, result, self.peer.name], [mode, result, self.me.name])
+            if not self.failures:
+                self.stamp_both("ok", [mode, self.peer.name], [mode, self.me.name])
+            self.stamp_both("check", [str(drift), self.peer.name], [str(drift), self.me.name])
+        for f in self.failures:
+            self.say(f"FAILED: {f}")
+        self.say(f"\nresult: {result} ({drift} differences left, {fixable} still marked fixable)")
+        return EXIT_FAIL if self.failures else (EXIT_OK if drift == 0 else EXIT_DRIFT)
+
+    # -- handoff --
+    def run_handoff(self) -> int:
+        self.lock()
+        if not self.reach():
+            self.say("hand-off needs both machines. If the other machine is gone for good, "
+                     "`rc lease force` here takes the lease without asking (conflict copies possible), "
+                     "or the lease expires and the standby takes over by itself.")
+            write_stamp("sync", ["handoff", "unreachable", self.peer.name])
+            return EXIT_UNREACHABLE
+        if not self.lock_peer():
+            return EXIT_FAIL
+        try:
+            return self._handoff_body()
+        finally:
+            self.unlock_peer()
+
+    def _handoff_body(self) -> int:
+        rc = self._sync_body(final_stamp=False)
+        if rc == EXIT_FAIL and not self.args.force:
+            self.say("sync failed: hand-off stopped before touching the lease (--force goes on anyway)")
+            self.stamp_both("sync", ["handoff", "failed", self.peer.name], ["handoff", "failed", self.me.name])
+            return rc
+        a, b = self.me.data["rc"], self.peer.data["rc"]
+        src = self.me if a["holds_lease"] else self.peer if b["holds_lease"] else None
+        tgt = self.host_by(self.args.to) if self.args.to else (self.other(src) if src else self.me)
+        if src is tgt:
+            self.say(f"{tgt.name} already holds the lease: nothing to hand over")
+            self.stamp_both("sync", ["handoff", "ok", self.peer.name], ["handoff", "ok", self.me.name])
+            return EXIT_OK
+        roles = [r["role"] for r in (src.data["rc"]["running"] if src else [])]
+        roles = list(dict.fromkeys(["greeter"] + roles))
+        self.say(f"== hand-off {src.name if src else 'free lease'} -> {tgt.name}; roles: {', '.join(roles)}")
+        if self.dry:
+            if src:
+                self.say(f"  would run [{src.name}] rc lease release (roles stop after their handoffs)")
+            self.say(f"  would run [{tgt.name}] workstation-lease acquire")
+            self.say("  would wait for the transcripts and handoff notes to arrive (content barrier)")
+            self.say(f"  would run [{tgt.name}] rc up " + " ".join(roles))
+            return EXIT_OK
+        if src:
+            if not self.act(src, "rc lease release (roles stop after their handoffs; up to about 2x the stop wait)",
+                            "rc lease release", timeout=3600, stream=src.local):
+                self.say(f"release failed: the lease stays with {src.name}; nothing started on {tgt.name}")
+                self.stamp_both("sync", ["handoff", "failed", self.peer.name], ["handoff", "failed", self.me.name])
+                return EXIT_FAIL
+        if not self.act(tgt, "take the lease", "/usr/local/libexec/workstation-lease acquire", timeout=300):
+            self.say(f"could not take the lease on {tgt.name}: run `rc lease take` there")
+            self.stamp_both("sync", ["handoff", "failed", self.peer.name], ["handoff", "failed", self.me.name])
+            return EXIT_FAIL
+        # Handoff notes the stopped roles wrote: move them before the barrier.
+        self.collect_all(fetch_yadm=True)
+        self.analyse()
+        for s in ("code", "yadm"):
+            if s in self.steps:
+                getattr(self, f"step_{s}")()
+        ok = self.barrier(src, tgt, roles) if src else True
+        if not ok:
+            self.say(f"the lease is on {tgt.name}, but not every transcript or note has arrived: roles not started. "
+                     f"Once Syncthing caught up: on {tgt.name} run `rc up {' '.join(roles)}`")
+            self.stamp_both("sync", ["handoff", "barrier-timeout", self.peer.name],
+                            ["handoff", "barrier-timeout", self.me.name])
+            return EXIT_FAIL
+        started = []
+        for r in roles:
+            if self.act(tgt, f"rc up {r}", f"rc up {shlex.quote(r)}", timeout=300):
+                started.append(r)
+        res = "ok" if len(started) == len(roles) and not self.failures else "partial"
+        self.stamp_both("sync", ["handoff", res, self.peer.name], ["handoff", res, self.me.name])
+        if res == "ok":
+            self.stamp_both("ok", ["handoff", self.peer.name], ["handoff", self.me.name])
+        self.say(f"\nhand-off {res}: lease and {len(started)} roles on {tgt.name}")
+        return EXIT_OK if res == "ok" else EXIT_DRIFT
+
+    def role_dirs(self, h: Host, roles: list[str]) -> list[str]:
+        r = h.sh("for f in " + " ".join(f'"$HOME/.config/claude-rc/"{shlex.quote(x + ".conf")}' for x in roles)
+                 + '; do [ -r "$f" ] && sed -n \'s/^RC_DIR="\\(.*\\)"$/\\1/p\' "$f"; done', timeout=60)
+        return [x for x in r.stdout.split("\n") if x]
+
+    def barrier(self, src: Host, tgt: Host, roles: list[str]) -> bool:
+        """Wait until the files the stopped roles changed recently have the same content on the target."""
+        b = self.cfg.get("barrier", {})
+        window = int(b.get("window_min", 240))
+        timeout = int(b.get("timeout_s", 900))
+        paths = [os.path.expanduser(p).replace(str(HOME), "~") for p in b.get("paths", ["~/.agents/session-handoff.md"])]
+        for d in self.role_dirs(src, roles):
+            enc = re.sub(r"[^A-Za-z0-9]", "-", d)
+            paths.append(f"recent:~/.claude/projects/{enc}")
+            rel = d.replace(str(HOME), "~")
+            if any(rel.startswith(s) for s in b.get("synced_roots", ["~/Obsidian", "~/sync"])):
+                paths.append(f"recent:{rel}/.agents")
+        folders = b.get("scan_folders", [])
+        if folders:
+            src.py("st-scan", *folders, timeout=120)
+        r = src.py("barrier-hash", "--window-min", str(window), *[f"--path={p}" for p in paths], timeout=300)
+        try:
+            want = json.loads(r.stdout)
+        except ValueError:
+            self.say("barrier: could not hash the source files")
+            return False
+        self.say(f"  barrier: {len(want)} files changed on {src.name} in the last {window} min must match on {tgt.name}")
+        t0 = time.time()
+        lag: list[str] = list(want)
+        while time.time() - t0 < timeout:
+            r = tgt.py("barrier-hash", "--window-min", "0", *[f"--file={f}" for f in want], timeout=300)
+            try:
+                have = json.loads(r.stdout)
+            except ValueError:
+                have = {}
+            lag = [f for f, s in want.items() if have.get(f) != s]
+            if not lag:
+                self.say(f"  barrier: all {len(want)} files arrived ({int(time.time() - t0)} s)")
+                return True
+            self.say(f"  barrier: {len(lag)} of {len(want)} still differ ({int(time.time() - t0)} s)")
+            time.sleep(15)
+        for f in lag[:20]:
+            self.say(f"    not there yet: {f}")
+        return False
+
+
+def die(msg: str, code: int = EXIT_FAIL) -> None:
+    print(f"ws-sync: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def load_config() -> dict:
+    if not CONFIG.exists():
+        die(f"config {CONFIG} missing (it lives in the Syncthing folder sync; see the knowledge map details, "
+            "Two workstations)", EXIT_USAGE)
+    try:
+        return tomllib.loads(CONFIG.read_text())
+    except tomllib.TOMLDecodeError as e:
+        die(f"config {CONFIG}: {e}", EXIT_USAGE)
+    return {}
+
+
+def maybe_detach(args: argparse.Namespace, argv: list[str]) -> None:
+    """A hand-off stops the rc roles of the releasing machine; a run started inside one would die with it."""
+    inside = os.environ.get("RC_DIR") or os.environ.get("CLAUDECODE")
+    if args.mode != "handoff" or args.dry_run or not inside or os.environ.get("WS_SYNC_DETACHED"):
+        return
+    unit = f"ws-sync-handoff-{int(time.time())}"
+    r = run(["systemd-run", "--user", "--collect", f"--unit={unit}", "--setenv=WS_SYNC_DETACHED=1",
+             f"--setenv=PATH={os.environ.get('PATH', '')}", sys.executable, "-I", str(SELF), *argv], timeout=60)
+    if r.returncode != 0:
+        die(f"could not detach the hand-off from this rc session: {r.stderr.strip()}")
+    print(f"hand-off runs detached from this rc session as {unit}; follow it with: journalctl --user -u {unit} -f")
+    sys.exit(EXIT_OK)
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    ap = argparse.ArgumentParser(prog="ws-sync", description=__doc__.split("\n\n")[0],
+                                 epilog="Exit: 0 aligned, 1 failure, 2 usage, 3 differences left, 4 peer unreachable.")
+    sub = ap.add_subparsers(dest="mode")
+
+    def common(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--peer", help="the other workstation (default: from the config)")
+        p.add_argument("--only", help="comma list of steps (yadm,code,rc,uv,flatpak,packages,ansible)")
+        p.add_argument("--skip", help="comma list of steps to leave out")
+        p.add_argument("-v", "--verbose", action="store_true", help="also show notes")
+    p = sub.add_parser("status", help="read-only comparison (default)")
+    common(p)
+    p.add_argument("--fetch", action="store_true", help="fetch the yadm remote first (exact secrets check)")
+    p = sub.add_parser("sync", help="close the gaps both ways")
+    common(p)
+    p.add_argument("-n", "--dry-run", action="store_true", help="show the plan, change nothing")
+    p.add_argument("--auto", action="store_true", help="unattended: config [auto] steps only, no root, no pushes")
+    p = sub.add_parser("handoff", help="sync, then move the lease and the running roles to the other machine")
+    common(p)
+    p.add_argument("-n", "--dry-run", action="store_true")
+    p.add_argument("--to", help="target machine (default: the one without the lease)")
+    p.add_argument("--force", action="store_true", help="go on after a failed sync step")
+    sub.add_parser("greeting", help="one line for the shell greeting (reads the local stamp only)")
+    # host-side helpers (called over SSH by the coordinator)
+    p = sub.add_parser("collect")
+    p.add_argument("--fetch-yadm", action="store_true")
+    p.add_argument("--section", action="append")
+    p = sub.add_parser("code-refresh")
+    p.add_argument("--phase", choices=["push", "ff", "clone"], required=True)
+    p.add_argument("--code-dir", default="~/code")
+    p.add_argument("--push-default", action="store_true")
+    p.add_argument("--push-untracked", action="store_true")
+    p.add_argument("--push-remote", action="append", default=[], help="glob of remote URLs that may be pushed to")
+    p.add_argument("--url", action="append")
+    p.add_argument("repos", nargs="*")
+    p = sub.add_parser("barrier-hash")
+    p.add_argument("--window-min", type=int, default=240)
+    p.add_argument("--path", dest="paths", action="append")
+    p.add_argument("--file", dest="files", action="append")
+    p = sub.add_parser("st-scan")
+    p.add_argument("folders", nargs="*")
+    p = sub.add_parser("stamp")
+    p.add_argument("--kind", required=True)
+    p.add_argument("--ansible-json")
+    p.add_argument("fields", nargs="*")
+
+    if not argv or argv[0].startswith("-") and argv[0] not in ("-h", "--help"):
+        argv = ["status", *argv]
+    args = ap.parse_args(argv)
+    if args.mode == "collect":
+        print(json.dumps(collect(load_config() if CONFIG.exists() else {}, args.fetch_yadm, args.section)))
+        return EXIT_OK
+    if args.mode == "code-refresh":
+        return h_code_refresh(args)
+    if args.mode == "barrier-hash":
+        return h_barrier_hash(args)
+    if args.mode == "st-scan":
+        return h_st_scan(args)
+    if args.mode == "stamp":
+        if args.kind != "none":
+            write_stamp(args.kind, args.fields)
+        if args.ansible_json:
+            atomic_write(LOCAL_STATE / "ansible.json", args.ansible_json)
+        return EXIT_OK
+    if args.mode == "greeting":
+        return greeting()
+    cfg = load_config()
+    maybe_detach(args, argv)
+    c = Coordinator(args, cfg)
+    if args.mode == "status":
+        return c.run_status()
+    if args.mode == "sync":
+        return c.run_sync()
+    return c.run_handoff()
+
+
+def greeting() -> int:
+    """Fallback for shells without the zsh snippet: same line, from the same stamp."""
+    p = LOCAL_STATE / "last"
+    lines = {}
+    if p.exists():
+        for line in p.read_text().splitlines():
+            f = line.split()
+            if f:
+                lines[f[0]] = f
+    s = lines.get("sync")
+    msg = "Sync: ws-sync"
+    if not s:
+        msg += " (no sync recorded yet; run: ws-sync sync)"
+    else:
+        res = s[3]
+        if re.fullmatch(r"\d+-left", res):
+            res = f"done, {res[:-5]} differences need a person"
+        msg += f" (last {s[2]} {ago(int(s[1]))} with {s[4]}: {res}"
+        ok = lines.get("ok")
+        if s[3] != "ok" and not s[3].endswith("-left") and ok:
+            msg += f"; last ok {ago(int(ok[1]))}"
+        c = lines.get("check")
+        if c and int(c[1]) > int(s[1]) + 60:
+            msg += f"; check {ago(int(c[1]))}: " + ("peer unreachable" if c[3] == "unreachable" else f"{c[2]} differences")
+        msg += ")"
+    print(msg)
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

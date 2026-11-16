@@ -1,0 +1,53 @@
+# ws-sync greeting (yadm; script ~/.local/bin/ws-sync): one line per interactive shell on the two workstations,
+# with the command name, the last sync (time, mode, result) and the last check. Reads only the local stamp
+# ~/.local/state/ws-sync/last ("sync <epoch> <mode> <result> <peer>", "ok <epoch> <mode> <peer>",
+# "check <epoch> <differences|?> <peer|unreachable>"), written by ws-sync on both machines.
+if [[ -o interactive && -x ~/.local/bin/ws-sync ]]; then
+  () {
+    zmodload -F zsh/datetime p:EPOCHSECONDS 2>/dev/null || return 0
+    local cfg=~/sync/ai/ws-sync/config.toml st=${XDG_STATE_HOME:-$HOME/.local/state}/ws-sync/last
+    local host=${HOST%%.*}
+    [[ -r $cfg ]] && grep -q "^\[hosts\.${host}\]" $cfg 2>/dev/null || return 0
+    _wss_ago() {
+      local s=$(( EPOCHSECONDS - $1 ))
+      if (( s < 5400 )); then print -n "$(( s / 60 )) min ago"
+      elif (( s < 172800 )); then print -n "$(( s / 3600 )) h ago"
+      else print -n "$(( s / 86400 )) d ago"; fi
+    }
+    local -a sync okl check
+    local line yellow=$'\e[33m' green=$'\e[32m' off=$'\e[0m' color=$green msg
+    if [[ -r $st ]]; then
+      while read -r line; do
+        case ${line%% *} in
+          sync) sync=(${=line}) ;;
+          ok) okl=(${=line}) ;;
+          check) check=(${=line}) ;;
+        esac
+      done < $st
+    fi
+    if (( ${#sync} < 5 )); then
+      print -r -- "${yellow}Sync:${off} ws-sync (no sync recorded yet; run: ws-sync sync, or ws-sync for the status)"
+      return 0
+    fi
+    local res=${sync[4]}
+    case $res in
+      ok) res="ok, aligned" ;;
+      <->-left) res="done, ${res%-left} differences need a person (ws-sync status)"; color=$off ;;
+      unreachable) res="peer unreachable"; color=$yellow ;;
+      *) color=$yellow ;;
+    esac
+    msg="ws-sync: last ${sync[3]} $(_wss_ago ${sync[2]}) with ${sync[5]}: ${res}"
+    if [[ ${sync[4]} != ok && ${sync[4]} != <->-left && ${#okl} -ge 3 ]]; then
+      msg+=", last ok $(_wss_ago ${okl[2]})"
+      # A sleeping standby is normal; stay quiet in colour while the last good sync is under 3 days old.
+      [[ ${sync[4]} == unreachable ]] && (( EPOCHSECONDS - okl[2] < 259200 )) && color=$off
+    fi
+    if (( ${#check} >= 4 && check[2] > sync[2] + 60 )); then
+      if [[ ${check[4]} == unreachable ]]; then msg+="; check $(_wss_ago ${check[2]}): peer unreachable"
+      elif [[ ${check[3]} == 0 ]]; then msg+="; check $(_wss_ago ${check[2]}): aligned"
+      else msg+="; check $(_wss_ago ${check[2]}): ${check[3]} differences"; fi
+    fi
+    print -r -- "${color}Sync:${off} ${msg}"
+    unfunction _wss_ago
+  }
+fi
