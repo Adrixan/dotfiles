@@ -13,7 +13,7 @@
 #                                           one line per running role; --short: plus stopped roles and RAM)
 #   rc slash <ls|start|stop|restart|logs|menu|h> "<arguments>"
 #                                           the Greeter's slash commands (rc hook greeter-slash runs them)
-#   rc up <role> [--ttl 4h] [--fresh] [--force] [--model M]  resumes the last session (relay keeps it ~4 h
+#   rc up <role> [--ttl 4h] [--fresh] [--force] [--model M] [--brief TEXT|-]  resumes the last session (relay keeps it ~4 h
 #                                           after a stop); --model (opus 5.5, fable 5.2, sonnet 5.5, haiku 5.5 or
 #                                           the ID) for this start only, every other start uses the default
 #                                           claude-opus-5-5 ("model" in ~/.claude/settings.json); rc code, trip,
@@ -50,6 +50,8 @@
 #   rc research --index                     rewrites Research/index.md from the report frontmatter
 #   rc project <Name> [--plugins P] [--description TEXT] [--brief TEXT|-] [up options]
 #                                           claude.ai-style project ~/Obsidian/Adrixan/AI/Claude.ai/Projects/<Name>
+#                                           (a name in ~/sync/ai/claude-rc/project-roles.list, e.g. Prof. Aufner,
+#                                           starts its home role instead, forwarded when remote: educator)
 #                                           (default home of projects, name case-insensitive): starts the role that
 #                                           serves the folder, else creates role project-<slug> (a new folder gets
 #                                           the layout <Name>.md, Wissen, Memory, Artifacts, Chats, .agents)
@@ -99,6 +101,8 @@ MIN_AVAILABLE_MB=1024
 #   RC_REMOTE_ROLES="<role>=<user>@<ssh host> ..."  these roles run on another host as that user; this
 #                             machine forwards rc up|down|restart|logs, lists them and never starts or
 #                             restores them (educator on edu-micro, Peter 2026-11-04)
+#   RC_PROJECT_ROLES="<project-slug>=<role> ..."  vault projects whose home is an existing role (added to
+#                             the shared list ~/sync/ai/claude-rc/project-roles.list, see project_home_role)
 # shellcheck source=/dev/null
 [[ -r "${CONF_DIR}/rc.env" ]] && . "${CONF_DIR}/rc.env"
 MIN_AVAILABLE_MB="${RC_MIN_AVAILABLE_MB:-$MIN_AVAILABLE_MB}"
@@ -275,8 +279,12 @@ usage() {
     exit 2
 }
 
+conf_value() {  # conf_value <file> <KEY>: the value of KEY="..." or of unquoted KEY=... (edu-micro's Ansible conf)
+    sed -n "s/^$2=\"\(.*\)\"\$/\1/p; t; s/^$2=\([^\"]*\)\$/\1/p" "$1" 2>/dev/null | head -1
+}
+
 conf_get() {  # conf_get <role> <KEY>
-    sed -n "s/^$2=\"\(.*\)\"\$/\1/p" "${CONF_DIR}/$1.conf"
+    conf_value "${CONF_DIR}/$1.conf" "$2"
 }
 
 resolve() {  # role name or label -> role name
@@ -406,7 +414,7 @@ all_signalled() {  # every live session ran rc handoff-done after the request an
 role_of_dir() {  # role served from a folder, or empty
     local f
     for f in "${CONF_DIR}"/*.conf; do
-        [[ "$(sed -n 's/^RC_DIR="\(.*\)"$/\1/p' "$f")" == "$1" ]] && { basename "$f" .conf; return 0; }
+        [[ -e "$f" && "$(conf_value "$f" RC_DIR)" == "$1" ]] && { basename "$f" .conf; return 0; }
     done
     return 0
 }
@@ -563,10 +571,12 @@ set_model() {  # set_model <role> [id]: model for this start; empty = the defaul
 unwant() { rm -f -- "${WANTED_DIR}/$1"; }
 
 cmd_up() {
-    local role ttl="" fresh=no force=no dir model=""
+    local role ttl="" fresh=no force=no dir model="" own_brief=no
     role="$(resolve "${1:?role missing}")"; shift
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --brief) [[ $# -ge 2 ]] || die "--brief needs a text, or - to read it from stdin"
+                     parse_brief --brief "$2"; own_brief=yes; shift 2 ;;  # rc up <role> --brief (forwarded project homes)
             --ttl) ttl="${2:?--ttl needs a duration such as 4h}"; shift 2 ;;
             --model) model="$(model_id "${2:?--model needs a model such as fable-5.2}")" || exit 1; shift 2 ;;
             --fresh) fresh=yes; shift ;;
@@ -578,6 +588,7 @@ cmd_up() {
         cancel_stop "$role"
         want "$role"
         echo "$role is already running ($(sessions "$role") sessions, model $(role_model "$role"))"
+        [[ "$own_brief" == yes ]] && echo "brief not queued: $role is already running; send the brief to its session \"$(conf_get "$role" RC_NAME)\" with SendMessage (ListAgents)"
         if [[ -n "$model" && "$model" != "$(role_model "$role")" ]]; then
             echo "it keeps that model; for $model: rc down $role --now, then rc up $role --model $model"
         fi
@@ -591,6 +602,7 @@ cmd_up() {
     if [[ "$force" != yes && "$(available_mb)" -lt "$MIN_AVAILABLE_MB" ]]; then
         die "only $(available_mb) MB RAM available (minimum ${MIN_AVAILABLE_MB}); stop a role or use --force"
     fi
+    [[ "$own_brief" == yes ]] && up_brief "$role" "$dir"
     if [[ "$fresh" == yes ]]; then fresh_pointer "$role"; else resume_info "$role"; fi
     set_model "$role" "$model"
     systemctl --user start "$(unit "$role")"
@@ -603,6 +615,14 @@ cmd_up() {
         echo "auto-stop in $ttl"
     fi
     echo "started $role with model $(role_model "$role")${model:+ (this start only)}: open the session \"$(conf_get "$role" RC_NAME)\" in the Claude app (appears within about 30 s)"
+}
+
+up_brief() {  # up_brief <role> <dir>: queue BRIEF when the role's folder has an rc start hook that hands it over
+    case "$2" in
+        "$SLOTS_DIR"/*|"$RESEARCH_SLOTS"/*|"$TRIPS_DIR"/*) queue_brief "$1" ;;
+        "$PROJECTS_HOME"/*) start_hook "$2" project-session; queue_brief "$1" ;;
+        *) echo "brief not queued: $1 has no rc start hook that takes a brief; send it to \"$(conf_get "$1" RC_NAME)\" with SendMessage (ListAgents) once it is listed (about 30 s)" ;;
+    esac
 }
 
 lease_on() { [[ -x "$LEASE_BIN" && -f "$LEASE_CONF" ]]; }
@@ -944,12 +964,49 @@ cmd_trips() {
     done | sort -n | awk -F'\t' 'BEGIN{printf "%-26s %-22s %-9s %s\n","ROLE","LABEL","STATE","LAST_ACT"} {printf "%-26s %-22s %-9s %s\n",$2,$3,$4,($1==""?"-":$1"m")}'
 }
 
-role_of_dir() {  # the role whose RC_DIR is this folder, or empty
-    local f
-    for f in "${CONF_DIR}"/*.conf; do
-        [[ "$(sed -n 's/^RC_DIR="\(.*\)"$/\1/p' "$f")" == "$1" ]] && { basename "$f" .conf; return 0; }
+# Project homes (Peter, 2026-11-16: "Have code resolve the educator issue"): a vault project can belong to a
+# role that is not served from its folder here, above all educator ("Prof. Aufner"), which runs on edu-micro.
+# rc project then starts that role (forwarded like rc up when it is remote) and never creates a local
+# project-<slug> role. Table: one "<project name or alias> = <role>" per line in the shared list (Syncthing,
+# both workstations) plus RC_PROJECT_ROLES in rc.env; a name that is a forwarded role (RC_REMOTE_ROLES)
+# counts too. Names compare by slug without hyphens, so case, spaces and dots do not matter.
+PROJECT_ROLES_FILE="${RC_PROJECT_ROLES_FILE-${SHARED_CONF_DIR:+${SHARED_CONF_DIR}/project-roles.list}}"
+
+name_key() { slugify "$1" | tr -d -; }
+
+project_home_role() {  # project_home_role <name>: the role the project name or alias belongs to, or empty
+    local want key role line pair
+    local -a entries=()
+    want="$(name_key "$1")"
+    [[ -n "$want" ]] || return 0
+    for pair in ${RC_PROJECT_ROLES:-}; do entries+=("${pair%%=*}=${pair#*=}"); done
+    if [[ -n "$PROJECT_ROLES_FILE" && -f "$PROJECT_ROLES_FILE" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*(#|$) ]] || entries+=("$line")
+        done < "$PROJECT_ROLES_FILE"
+    fi
+    for pair in ${RC_REMOTE_ROLES:-}; do entries+=("${pair%%=*}=${pair%%=*}"); done
+    for line in "${entries[@]}"; do
+        [[ "$line" == *=* ]] || continue
+        key="$(name_key "${line%%=*}")"; role="${line##*=}"; role="${role//[[:space:]]/}"
+        if [[ -n "$key" && "$key" == "$want" && "$role" =~ ^[a-z][a-z0-9-]{1,39}$ ]]; then echo "$role"; return 0; fi
     done
     return 0
+}
+
+project_home_up() {  # project_home_up <name> <role> [up options]: start the project's home role, forwarded when remote
+    local name="$1" role="$2" target; shift 2
+    if target="$(remote_role_target "$role")"; then
+        echo "project ${name} belongs to role ${role} on ${target#*@}: forwarding"
+        if [[ "$BRIEF_SET" == yes ]]; then
+            printf '%s\n' "$BRIEF" | remote_role_rc "$target" up "$role" "$@" --brief -
+        else
+            remote_role_rc "$target" up "$role" "$@" </dev/null
+        fi
+        return
+    fi
+    [[ -e "${CONF_DIR}/${role}.conf" ]] || die "project ${name} belongs to role ${role}, which has no conf on $(local_host) (rc ls)"
+    if [[ "$BRIEF_SET" == yes ]]; then cmd_up "$role" "$@" --brief "$BRIEF"; else cmd_up "$role" "$@"; fi
 }
 
 project_brief() {  # AGENTS.md of a project role ($1 = folder name)
@@ -994,11 +1051,15 @@ EOF
 }
 
 project_rows_vault() {  # name, role (or -), state, minutes since last activity; newest first
-    local d role idle state
+    local d role idle state target
     for d in "${PROJECTS_HOME}"/*/; do
         [[ -d "$d" ]] || continue
         d="${d%/}"; role="$(role_of_dir "$d")"; idle=""; state="-"
-        if [[ -n "$role" ]]; then
+        if [[ -z "$role" ]]; then  # a project home elsewhere (educator on edu-micro)
+            role="$(project_home_role "${d##*/}")"
+            if [[ -n "$role" ]] && target="$(remote_role_target "$role")"; then state="on ${target#*@}"; fi
+        fi
+        if [[ -n "$role" && "$state" == - ]]; then
             idle="$(last_active_min "$role")"
             state="$(systemctl --user is-active "$(unit "$role")" 2>/dev/null || true)"
         fi
@@ -1024,6 +1085,8 @@ cmd_project() {
         esac
     done
     safe_value "$description"
+    role="$(project_home_role "$name")"
+    if [[ -n "$role" ]]; then project_home_up "$name" "$role" "$@"; return; fi
     for d in "${PROJECTS_HOME}"/*/; do
         base="${d%/}"; base="${base##*/}"
         [[ "${base,,}" == "${name,,}" ]] && { dir="${d%/}"; break; }
