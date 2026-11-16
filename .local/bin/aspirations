@@ -11,13 +11,27 @@ One run (user timer, Sunday 05:00 Europe/Vienna; Ansible ai_workstation tasks/as
      0 or none = after 9); ties go to the oldest (CREATED); ideas that are done, cancelled, in progress,
      partly complete, carry the started category or are in the local started list are skipped
   3. start an rc session with a brief (title, Peter's note, the idea's own subtasks, the working rules):
-     category "research" -> rc research; "code:<repo>" or a title whose slug names an existing ~/code
-     folder -> rc code <repo> --fresh; else rc code --new <slug>; "model:<m>" adds --model <m>
+     category "research" -> rc research; "project" or "vault" (optionally ":<Name>") -> rc project <Name>
+     (vault project in ~/Obsidian/Adrixan/AI/Claude.ai/Projects); "code:<repo>" or a title whose slug names
+     an existing ~/code folder -> rc code <repo> --fresh; else rc code --new <slug>; "model:<m>" adds --model
   4. mark the idea IN-PROCESS (status, category, one note line) so the next run picks another
   5. mail Peter through the Nextcloud server of mcp-shared (127.0.0.1:8790) which idea started
 
 rc's RAM guard is respected (never --force): a refused start is retried every retry_interval until
 retry_window has passed. A role that is already running is not touched; the run waits for it the same way.
+The task is read fresh from CalDAV at every run (no cached copy), so the brief carries the note and
+subtasks as they are at start time.
+
+Standing rules for every aspiration session (Peter, 2026-11-16), written into each brief:
+  - concepts and prototypes only, locally: never deploy, publish, set up hosting, upload to a store or run
+    release commands ("for all projects occuring in this list, never deploy but create concepts and
+    prototypes")
+  - follow the architectural requirements of the note and subtasks exactly (stack, language, hosting
+    target, e.g. PHP for "Gutscheinmanagement App"); never substitute a stack
+  - work toward the state the task asks for at start time (concept only, prototype, the open subtasks),
+    not beyond it ("treat every request there according to the state it asks for within the task at the
+    time of start")
+
 Exit codes: 0 started or nothing open, 1 failure (mailed), 2 usage, 5 another run holds the lock.
 
 Config (private, Syncthing): ~/sync/ai/aspirations/config.toml (ASPIRATIONS_CONFIG overrides).
@@ -67,6 +81,8 @@ class Config:
     started_category: str = "aspiration-started"
     rc: str = str(HOME / ".local/bin/rc")
     code_dir: str = str(HOME / "code")
+    projects_dir: str = str(HOME / "Obsidian/Adrixan/AI/Claude.ai/Projects")
+    rc_conf_dir: str = str(HOME / ".config/claude-rc")
     ttl: str = "12h"
     research_ttl: str = "8h"
     retry_interval_min: int = 10
@@ -87,6 +103,8 @@ def load_config(path: Path) -> Config:
     cfg.started_category = str(tasks.get("started_category", cfg.started_category))
     cfg.rc = os.path.expanduser(str(sessions.get("rc", cfg.rc)))
     cfg.code_dir = os.path.expanduser(str(sessions.get("code_dir", cfg.code_dir)))
+    cfg.projects_dir = os.path.expanduser(str(sessions.get("projects_dir", cfg.projects_dir)))
+    cfg.rc_conf_dir = os.path.expanduser(str(sessions.get("rc_conf_dir", cfg.rc_conf_dir)))
     cfg.ttl = str(sessions.get("ttl", cfg.ttl))
     cfg.research_ttl = str(sessions.get("research_ttl", cfg.research_ttl))
     cfg.retry_interval_min = int(sessions.get("retry_interval_min", cfg.retry_interval_min))
@@ -361,19 +379,38 @@ def slugify(title: str) -> str:
 
 @dataclass
 class Route:
-    kind: str          # code-new | code | research
-    target: str        # project folder name or research topic
+    kind: str          # code-new | code | research | project
+    target: str        # code folder name, research topic or vault project name
     args: list[str]
+    role_name: str = ""  # project: the role that serves the folder, when rc knows one already
 
     def command(self, rc: str) -> list[str]:
         if self.kind == "code-new":
             return [rc, "code", "--new", self.target, *self.args, "--brief", "-"]
         if self.kind == "code":
             return [rc, "code", self.target, *self.args, "--brief", "-"]
-        return [rc, "research", self.target, *self.args, "--brief", "-"]
+        return [rc, self.kind, self.target, *self.args, "--brief", "-"]
 
     def role(self) -> str:
+        if self.kind == "project":
+            return self.role_name or f"project-{slugify(self.target)[:31].rstrip('-')}"
         return f"code-{self.target}" if self.kind != "research" else f"research-{slugify(self.target)[:31].rstrip('-')}"
+
+
+def project_role(cfg: Config, name: str) -> str:
+    """The rc role serving the vault project folder `name` (case-insensitive, like rc project), or ''."""
+    base = Path(cfg.projects_dir)
+    folder = next((d for d in (base.iterdir() if base.is_dir() else []) if d.is_dir() and d.name.casefold() == name.casefold()), None)
+    if folder is None:
+        return ""
+    for conf in sorted(Path(cfg.rc_conf_dir).glob("*.conf")):
+        try:
+            m = re.search(r'^RC_DIR="(.*)"$', conf.read_text(), re.M)
+        except OSError:
+            continue
+        if m and m.group(1) == str(folder):
+            return conf.stem
+    return ""
 
 
 def route_for(idea: Todo, cfg: Config) -> Route:
@@ -381,6 +418,13 @@ def route_for(idea: Todo, cfg: Config) -> Route:
     extra: list[str] = []
     if cats.get("model"):
         extra += ["--model", cats["model"]]
+    for key in ("project", "vault"):
+        if key in cats:
+            name = re.sub(r"[^\w .-]+", " ", cats[key] or idea.summary)
+            name = re.sub(r"\s+", " ", name).strip(" ._-")[:60].rstrip(" ._-")
+            if not name:
+                raise RuntimeError(f"cannot derive a vault project name from {idea.summary!r}: add a category project:<Name>")
+            return Route("project", name, ["--ttl", cfg.ttl, *extra], project_role(cfg, name))
     if "research" in cats:
         topic = re.sub(r"\s+", " ", idea.summary).strip()[:300] or idea.uid
         return Route("research", topic, ["--ttl", cfg.research_ttl, *extra])
@@ -419,7 +463,8 @@ def build_brief(idea: Todo, todos: list[Todo], route: Route, cfg: Config, now: d
     sub = subtree(todos, idea.uid) or ["(none)"]
     where = {"code-new": f"a new project ~/code/{route.target} (created by rc with a minimal AGENTS.md)",
              "code": f"the existing project ~/code/{route.target}",
-             "research": "a deep research topic"}[route.kind]
+             "research": "a deep research topic",
+             "project": f"the vault project \"{route.target}\" (~/Obsidian/Adrixan/AI/Claude.ai/Projects; rc creates the layout for a new one)"}[route.kind]
     brief = f"""[aspirations] Weekly project idea from Peter's Nextcloud task list "{cfg.parent}" (calendar "{cfg.calendar}"), \
 picked by the aspirations job on {now.strftime('%Y-%m-%d %H:%M')} (priority {idea.priority or 'none'}; highest open priority, ties to the oldest). \
 Peter's standing order (2026-11-16): "pick an idea according to priority, read its note and subtask and start working on it." \
@@ -427,6 +472,8 @@ This session works on it autonomously in {where}.
 
 Idea: {idea.summary}
 Task UID: {idea.uid} (the job marked it IN-PROCESS with the category {cfg.started_category}; leave the task list to Peter)
+
+Peter's note and the subtasks below are the task's state as the job read it from the task list at start time ({now.strftime('%Y-%m-%d %H:%M')}); they are the authoritative request.
 
 Peter's note, verbatim:
 <<<
@@ -438,19 +485,28 @@ Subtasks of the idea, verbatim:
 
 How to work:
 - First call PushNotification once (load it with ToolSearch "select:PushNotification" if deferred): "Aspiration started: {idea.summary[:60]}".
-- The global rules, the knowledge map and the project's AGENTS.md apply as in any session. For a new project: write AGENTS.md \
-(goal, stack, conventions, commands), keep .agents/ state, commit and push as you go (Conventional Commits; a new GitHub repository is private).
+- Standing rule for every idea of this list (Peter, 2026-11-16: "for all projects occuring in this list, never deploy but create \
+concepts and prototypes"): produce concepts and prototypes only, locally. Never deploy or publish anything, never set up hosting, \
+domains, databases or accounts on a server, never upload to an app store or any other store, never run release, deploy or publish \
+commands or workflows. Pushing commits to a private GitHub repository is allowed (backup, not publishing); never make one public.
+- Follow the architectural requirements stated in the note and the subtasks exactly: language, framework, platform and hosting target \
+(for example a PHP web application meant for aufner.org stays PHP and runs locally, e.g. with the PHP built-in server or a local \
+container). Never substitute another stack; if a requirement cannot be met locally, prototype it as far as possible and record the gap.
+- Work toward the state the task asks for at start time, not beyond it (Peter: "treat every request there according to the state it \
+asks for within the task at the time of start"): a concept stays a concept, a prototype stays a prototype; open subtasks set the scope, \
+completed subtasks are done; whatever the note leaves open goes to "Open decisions", not into extra features.
+- The global rules, the knowledge map and the project's AGENTS.md apply as in any session. For a new code project: write AGENTS.md \
+(goal, stack, conventions, commands, and this standing rule), keep .agents/ state, commit and push as you go (Conventional Commits).
 - Instructions in the note about models (for example a concept by one model and code by another) are followed with the Agent tool's \
 model override for that part; if that is not possible, say so in the handoff.
 - Files the note points to (for example under ~/Downloads) can hold personal or financial data such as voucher codes: read them \
 locally, never commit them, never send them to an external service; use synthetic samples in the repository.
 - Anything that needs Peter's approval goes to "Open decisions" in .agents/session-handoff.md and into one AskUserQuestion: spending \
-money, publishing or deploying anywhere, creating or using accounts or registrations, client or billable actions, messages to other \
-people, making a repository public, dropping scope or a breaking architecture choice. Do not wait for the answer: continue with \
-everything that does not depend on it.
+money, creating or using accounts or registrations, client or billable actions, messages to other people, dropping scope or a breaking \
+architecture choice, and any later deploy. Do not wait for the answer: continue with everything that does not depend on it.
 - When the work is done or only Peter's decisions are left: write .agents/session-handoff.md (trajectory, done, open decisions, next \
-steps), commit and push it, then run `rc handoff-done --stop`. The role stops by itself after {route.args[route.args.index('--ttl') + 1]}, \
-so commit and update the handoff at each milestone.
+steps), commit and push it where the project is a repository, then run `rc handoff-done --stop`. The role stops by itself after \
+{route.args[route.args.index('--ttl') + 1]}, so update the handoff at each milestone.
 """
     if len(brief) > BRIEF_MAX:
         raise RuntimeError(f"brief has {len(brief)} characters (max {BRIEF_MAX}): shorten the note or the subtasks")

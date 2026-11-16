@@ -77,7 +77,7 @@ busy-session guards.
 - Vault projects (claude.ai-style: instruction note, `Wissen/`, `Memory/`, `Artifacts/`, `Chats/`,
   `.agents/`), whose default home since 2026-11-03 is `~/Obsidian/Adrixan/AI/Claude.ai/Projects/` (Peter;
   layout and rules in `~/Obsidian/Adrixan/AI/Roles/projects/AGENTS.md`): `rc project <Name> [--plugins P]
-  [--description "…"] [up options]` starts the role that serves `Projects/<Name>` (name case-insensitive,
+  [--description "…"] [--brief -] [up options]` starts the role that serves `Projects/<Name>` (name case-insensitive,
   e.g. `educator` for Prof. Aufner), else creates the role `project-<slug>` (label "Project: <Name>",
   research plugin unless `--plugins` says otherwise); an unknown name creates the folder with that layout
   first. The folder inherits the trust of `Projects/` (accepted 2026-11-03). `rc project --list` lists the
@@ -122,9 +122,10 @@ busy-session guards.
   project → `rc project`; educator content → `rc up educator` (runs on edu-micro). Not in a role session
   of the wrong kind, and not by asking Peter for permission prompts in a folder that is not made for it.
 - Brief for a new or stopped session: add `--brief -` and pipe the context on stdin
-  (`printf '%s\n' "$text" | rc code <project> --brief -`; `rc trip` and `rc research` take it too, max
-  20000 characters). The role's start hook hands it over as the first message (`[handoff]`,
-  `[trip-brief]`, or appended to the `[deep-research]` start). The brief holds: Peter's request verbatim,
+  (`printf '%s\n' "$text" | rc code <project> --brief -`; `rc trip`, `rc research` and `rc project` take it
+  too, max 20000 characters). The role's start hook hands it over as the first message (`[handoff]`,
+  `[trip-brief]`, `[project-brief]`, or appended to the `[deep-research]` start). `rc project --brief` adds
+  the start hook `rc hook project-session` to the project folder's `.claude/settings.json` (2026-11-16). The brief holds: Peter's request verbatim,
   goal, what is known or decided (paths of reports, notes, files), constraints, and what to report back.
   No secrets; student and family data only where the receiving role is allowed to hold them.
 - Running session: rc does not queue a brief (it says so); send it with `SendMessage` to the session

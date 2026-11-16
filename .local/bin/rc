@@ -32,7 +32,7 @@
 #                                           role trip-<slug> in ~/Obsidian/Adrixan/Travel/Trips/<slug>
 #                                           (created on first use, resumed later); --brief: Peter's full
 #                                           request (- reads stdin), logged in brief.md and handed to the
-#                                           next session as its first message (rc code|research take it too)
+#                                           next session as its first message (rc code|research|project take it too)
 #   rc trips                                trip roles, most recently active first
 #                                           (with RC_TRIP_HOST in rc.env these and rc up/down/restart/logs/rm trip-* forward there)
 #   rc projects                             folders in ~/code, most recently used first
@@ -48,7 +48,7 @@
 #                                           an existing topic (slug or role) resumes
 #   rc researches                           research topics, most recently active first
 #   rc research --index                     rewrites Research/index.md from the report frontmatter
-#   rc project <Name> [--plugins P] [--description TEXT] [up options]
+#   rc project <Name> [--plugins P] [--description TEXT] [--brief TEXT|-] [up options]
 #                                           claude.ai-style project ~/Obsidian/Adrixan/AI/Claude.ai/Projects/<Name>
 #                                           (default home of projects, name case-insensitive): starts the role that
 #                                           serves the folder, else creates role project-<slug> (a new folder gets
@@ -144,7 +144,7 @@ RESEARCH_SLOTS="${RESEARCH_DIR}/.rc"
 REPORTS_DIR="${RESEARCH_DIR}/Reports"
 RESEARCH_TTL=8h
 RESEARCH_REMOTE="${STATE_DIR}/research-remote"  # cse_<id> of sessions that already got their start turn
-# Handoff briefs (Peter, 2026-11-09): `rc trip|code|research ... --brief TEXT` (or `--brief -` from stdin)
+# Handoff briefs (Peter, 2026-11-09; project since 2026-11-16): `rc trip|code|research|project ... --brief TEXT` (or `--brief -` from stdin)
 # queues the full request or context for the role's next session; its start hook hands it over as the
 # first message. Never queued for a running role (its session gets it by SendMessage instead).
 BRIEFS_DIR="${STATE_DIR}/briefs"  # <role>: pending brief
@@ -900,8 +900,8 @@ take_brief() {  # take_brief <role>: print and remove the pending brief (atomic:
     cat -- "$t"; rm -f -- "$t"
 }
 
-trip_hook() {  # the trip folder's settings get the start hook that hands over a queued brief
-    local s="$1/.claude/settings.json" c="\"\$HOME/.local/bin/rc\" hook trip-session" cur='{}' new
+start_hook() {  # start_hook <folder> <hook>: the folder's settings get the start hook that hands over a queued brief
+    local s="$1/.claude/settings.json" c="\"\$HOME/.local/bin/rc\" hook $2" cur='{}' new
     mkdir -p "$1/.claude"
     [[ -s "$s" ]] && { cur="$(jq -c . "$s" 2>/dev/null)" || { echo "rc: $s is not valid JSON; start hook not added" >&2; return 0; }; }
     jq -e --arg c "$c" 'any(.hooks.SessionStart[]?.hooks[]?; .command == $c)' <<< "$cur" >/dev/null && return 0
@@ -928,7 +928,7 @@ cmd_trip() {
             --description "Trip planning: ${dest}" --brief "$(trip_brief "$dest")"
     fi
     dir="$(conf_get "$role" RC_DIR)"
-    trip_hook "$dir"
+    start_hook "$dir" trip-session
     log_trip_brief "$dir"
     queue_brief "$role"
     cmd_up "$role" "${UP_ARGS[@]}"
@@ -1015,6 +1015,7 @@ cmd_project() {
         return 0
     fi
     [[ "$name" =~ ^[[:alnum:]][[:alnum:]\ ._-]{0,59}$ ]] || die "project name: letters, digits, spaces, dots, hyphens, underscores; up to 60 characters"
+    parse_brief "$@"; set -- "${UP_ARGS[@]}"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --plugins) plugins="$2"; shift 2 ;;
@@ -1041,6 +1042,10 @@ cmd_project() {
         [[ -e "${CONF_DIR}/${role}.conf" ]] && die "role $role exists for another folder ($(conf_get "$role" RC_DIR))"
         cmd_new "$role" --label "Project: ${dir##*/}" --dir "$dir" --plugins "$plugins" \
             --description "Project ${dir##*/}${description:+: ${description}}" --brief "$(project_brief "${dir##*/}")"
+    fi
+    if [[ "$BRIEF_SET" == yes ]]; then  # the project folder's start hook hands it to the next session
+        start_hook "$dir" project-session
+        queue_brief "$role"
     fi
     cmd_up "$role" "$@"
 }
@@ -1322,6 +1327,7 @@ hook_reboot_note() {  # global SessionStart hook: the note for roles without an 
     case "${RC_DIR:-}" in
         ""|"$CODE_DIR"|"$SLOTS_DIR"/*|"$RESEARCH_SLOTS"/*|"$TRIPS_DIR"/*) return 0 ;;  # their own hooks deliver it
     esac
+    [[ "$RC_DIR" == "$PROJECTS_HOME"/* ]] && project_has_hook "$RC_DIR" && return 0  # so does a project's
     note="$(take_reboot_note "$RC_DIR")"
     [[ -n "$note" ]] || return 0
     jq -n --arg m "$note" '{hookSpecificOutput: {hookEventName: "SessionStart", initialUserMessage: $m}}'
@@ -1461,11 +1467,35 @@ hook_trip_session() {  # SessionStart hook of trip roles (Trips/<slug>/.claude/s
         '{hookSpecificOutput: ({hookEventName: "SessionStart", additionalContext: $c} + (if $m == "" then {} else {initialUserMessage: $m} end))}'
 }
 
+hook_project_session() {  # SessionStart hook of vault project roles (Projects/<Name>/.claude/settings.json, added by rc project --brief)
+    local role brief message="" note=""
+    cat >/dev/null
+    case "${RC_DIR:-}" in
+        "$PROJECTS_HOME"/*) ;;
+        *) return 0 ;;
+    esac
+    role="$(role_of_dir "$RC_DIR")"
+    [[ -n "$role" ]] || return 0
+    brief="$(take_brief "$role")"
+    if [[ -n "$brief" ]]; then
+        printf -v message '[project-brief] %s: context handed over with rc project --brief, verbatim:\n\n%s\n\nRead the instruction note, Wissen/, Memory/ and .agents/session-handoff.md first, then take this over; tell Peter in one line what you took over.' "${RC_DIR##*/}" "$brief"
+    fi
+    note="$(take_reboot_note "$RC_DIR")"
+    if [[ -n "$note" ]]; then [[ -n "$message" ]] && message+=$'\n\n'; message+="$note"; fi
+    [[ -n "$message" ]] || return 0
+    jq -n --arg m "$message" '{hookSpecificOutput: {hookEventName: "SessionStart", initialUserMessage: $m}}'
+}
+
+project_has_hook() {  # project_has_hook <folder>: its settings carry the project-session start hook
+    grep -qsF 'bin/rc\" hook project-session' "$1/.claude/settings.json"
+}
+
 cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, greeter-start for the Greeter
     case "${1:-}" in
         turn-done) hook_turn_done || true; return 0 ;;  # a failing Stop hook must never block a session
         research-session) hook_research_session; return 0 ;;
         trip-session) hook_trip_session; return 0 ;;
+        project-session) hook_project_session; return 0 ;;
         reboot-note) hook_reboot_note; return 0 ;;
         greeter-slash) hook_greeter_slash; return 0 ;;
     esac
@@ -1684,12 +1714,11 @@ slash_start() {
             done
             return 0 ;;
     esac
-    # code and trip queue a brief for the new session; research appends it to the topic start; project takes none
-    if [[ -n "$brief" && "$kind" != project ]]; then
+    # code, trip and project queue a brief for the new session; research appends it to the topic start
+    if [[ -n "$brief" ]]; then
         printf '%s\n' "$brief" | host_rc "$host" "${args[@]}" "${opts[@]}" --brief - 2>&1 || true
     else
         host_rc "$host" "${args[@]}" "${opts[@]}" </dev/null 2>&1 || true
-        [[ -n "$brief" ]] && echo "BRIEF Project: ${rest[*]} | project | $host"
     fi
     return 0
 }

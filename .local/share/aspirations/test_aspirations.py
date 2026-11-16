@@ -119,13 +119,22 @@ class Selection(unittest.TestCase):
         self.assertIn("- [x] Step two (status completed)", brief)
         self.assertIn("rc handoff-done --stop", brief)
         self.assertIn("Open decisions", brief)
+        self.assertIn("never deploy but create concepts and prototypes", brief)
+        self.assertIn("Never deploy or publish anything", brief)
+        self.assertIn("architectural requirements stated in the note", brief)
+        self.assertIn("state the task asks for at start time", brief)
+        self.assertIn("state as the job read it from the task list at start time", brief)
+        self.assertNotIn("publishing or deploying anywhere", brief)
 
 
 class Routing(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.cfg = A.Config(code_dir=self.tmp.name)
-        (Path(self.tmp.name) / "existing-app").mkdir()
+        root = Path(self.tmp.name)
+        for d in ("code/existing-app", "projects/BIMM", "projects/Music", "confs"):
+            (root / d).mkdir(parents=True)
+        (root / "confs/bimm.conf").write_text(f'# x\nRC_DIR="{root}/projects/BIMM"\nRC_NAME="BIMM"\n')
+        self.cfg = A.Config(code_dir=str(root / "code"), projects_dir=str(root / "projects"), rc_conf_dir=str(root / "confs"))
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -144,10 +153,21 @@ class Routing(unittest.TestCase):
         self.assertEqual(r.command("/rc"), ["/rc", "code", "--new", "new-thing", "--ttl", "12h", "--brief", "-"])
         r = A.route_for(self.idea("Existing App"), self.cfg)
         self.assertEqual((r.kind, r.target, r.args[0]), ("code", "existing-app", "--fresh"))
+        self.assertEqual(A.route_for(self.idea("Research", "project"), self.cfg).kind, "project")
         r = A.route_for(self.idea("Whatever", "code:existing-app,model:fable-5.2"), self.cfg)
         self.assertEqual((r.kind, r.target, r.args[-2:]), ("code", "existing-app", ["--model", "fable-5.2"]))
         r = A.route_for(self.idea("Solarpunk energy markets", "research"), self.cfg)
         self.assertEqual(r.command("/rc")[:3], ["/rc", "research", "Solarpunk energy markets"])
+        r = A.route_for(self.idea("Garten: Plan / Saison 2027!", "project"), self.cfg)
+        self.assertEqual(r.command("/rc"), ["/rc", "project", "Garten Plan Saison 2027", "--ttl", "12h", "--brief", "-"])
+        self.assertEqual(r.role(), "project-garten-plan-saison-2027")
+        r = A.route_for(self.idea("Whatever", "vault:bimm,model:sonnet-5.5"), self.cfg)
+        self.assertEqual((r.target, r.role(), r.args[-2:]), ("bimm", "bimm", ["--model", "sonnet-5.5"]))
+        r = A.route_for(self.idea("Übungsheft Größen", "project"), self.cfg)
+        self.assertEqual(r.target, "Übungsheft Größen")
+        self.assertEqual(A.route_for(self.idea("x", "project:Music"), self.cfg).role(), "project-music")
+        with self.assertRaises(RuntimeError):
+            A.route_for(self.idea("!!!", "project"), self.cfg)
         with self.assertRaises(RuntimeError):
             A.route_for(self.idea("x", "code:../etc"), self.cfg)
         with self.assertRaises(RuntimeError):
