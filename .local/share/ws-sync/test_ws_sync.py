@@ -27,9 +27,9 @@ _loader.exec_module(wss)
 CFG = {
     "hosts": {"alpha": {"ssh": "alpha", "ansible_roles": ["ai_workstation"]}, "beta": {"ssh": "b"}},
     "code": {"push_remotes": ["git@github.com:me/*"], "push_in": ["sync", "handoff"],
-             "push_default_branch_in": ["sync", "handoff"], "push_untracked_in": ["handoff"]},
-    "packages": {"ignore": ["kernel-*"], "only_on": {"alpha": ["steam"]}},
-    "secrets": {"volatile": [".config/rclone/rclone.conf"]},
+             "push_default_branch_in": ["sync", "handoff"], "push_untracked_in": ["handoff"],
+             "read_only": ["archived"]},
+    "packages": {"ignore": ["kernel-*"], "host_specific": {"alpha": ["sdbootutil"]}},
     "timers": {"ignore": ["user:rc-ttl-*"], "only_on": {"alpha": ["user:backup.timer"]}},
 }
 
@@ -94,6 +94,40 @@ class Base(unittest.TestCase):
 
 
 class CodeTests(Base):
+    def test_branch_already_on_merge_request_branch_is_not_pushed(self):
+        a = host_data("alpha", code={"repos": {"r": repo("git@github.com:me/r.git", {"main": br("s1", ahead=72,
+                                     on_remote=["origin/merge/x"])})}, "exclude": []})
+        b = host_data("beta", code={"repos": {"r": repo("git@github.com:me/r.git", {"main": br("s1", ahead=72,
+                                    on_remote=["origin/merge/x"])})}, "exclude": []})
+        it = self.items(self.coord(a=a, b=b), "code")
+        self.assertTrue(it and all(i.level == "info" and not i.fix for i in it))
+
+    def test_merged_diverged_branch_is_dropped_unless_checked_out(self):
+        branches = {"main": br("s0"), "feat": br("s5", up="origin/feat", ahead=3, behind=2, merged=True)}
+        a = host_data("alpha", code={"repos": {"r": repo("git@github.com:me/r.git", branches)}, "exclude": []})
+        b = host_data("beta", code={"repos": {"r": repo("git@github.com:me/r.git", {"main": br("s0")})},
+                                    "exclude": []})
+        self.assertTrue(any(i.fix == "drop the merged local copy on alpha" for i in self.items(self.coord(a=a, b=b), "code")))
+        a["code"]["repos"]["r"]["current"] = "feat"
+        it = self.items(self.coord(a=a, b=b), "code")
+        self.assertTrue(any("resolve by hand" in i.text and not i.fix for i in it))
+
+    def test_unmerged_diverged_branch_stops_for_a_person(self):
+        branches = {"main": br("s0"), "feat": br("s5", up="origin/feat", ahead=1, behind=1, merged=False)}
+        a = host_data("alpha", code={"repos": {"r": repo("git@github.com:me/r.git", branches)}, "exclude": []})
+        b = host_data("beta", code={"repos": {"r": repo("git@github.com:me/r.git", {"main": br("s0")})},
+                                    "exclude": []})
+        it = self.items(self.coord(a=a, b=b), "code")
+        self.assertTrue(any("never force-pushes" in i.text and i.level == "warn" and not i.fix for i in it))
+
+    def test_read_only_repo_dirty_is_a_note(self):
+        a = host_data("alpha", code={"repos": {"archived": repo("git@github.com:me/a.git", {"main": br("s0")},
+                                                                dirty=1, dirty_files=[".agents/x.md"])}, "exclude": []})
+        b = host_data("beta", code={"repos": {"archived": repo("git@github.com:me/a.git", {"main": br("s0")})},
+                                    "exclude": []})
+        it = self.items(self.coord(a=a, b=b), "code")
+        self.assertTrue(it and all(i.level == "info" for i in it))
+
     def test_foreign_remote_is_never_pushed(self):
         a = host_data("alpha", code={"repos": {"client": repo("git@gitlab.com:client/x.git",
                                                               {"main": br("s1", ahead=3)})}, "exclude": []})
@@ -135,18 +169,33 @@ class CodeTests(Base):
 
 
 class SecretsTests(Base):
-    def test_volatile_newer_file_does_not_block_decrypt(self):
-        a = host_data("alpha")
-        a["yadm"]["behind"] = 1
-        a["yadm"]["secrets"]["newer_local"] = [".config/rclone/rclone.conf"]
-        c = self.coord(a=a)
-        self.assertFalse([i for i in self.items(c, "secrets") if i.level == "warn"])
-        self.assertTrue(any(i.level == "info" for i in self.items(c, "secrets")))
-
-    def test_real_local_edit_warns(self):
+    def test_one_machine_with_edits_gets_reencrypt_fix(self):
         a = host_data("alpha")
         a["yadm"]["secrets"]["newer_local"] = [".config/ai/env.local"]
-        self.assertTrue(any(i.level == "warn" for i in self.items(self.coord(a=a), "secrets")))
+        it = self.items(self.coord(a=a), "secrets")
+        self.assertEqual([i.fix for i in it], ["yadm-reencrypt --changed on alpha"])
+
+    def test_edits_on_both_machines_warn_without_fix(self):
+        a, b = host_data("alpha"), host_data("beta")
+        a["yadm"]["secrets"]["newer_local"] = [".config/ai/env.local"]
+        b["yadm"]["secrets"]["newer_local"] = [".config/ai/env"]
+        it = self.items(self.coord(a=a, b=b), "secrets")
+        self.assertTrue(len(it) == 2 and all(i.level == "warn" and not i.fix for i in it))
+
+    def test_reencrypt_plan_pulls_without_decrypt_first(self):
+        a = host_data("alpha")
+        a["yadm"].update(behind=1)
+        a["yadm"]["secrets"].update(newer_local=[".config/ai/env.local"], older_local=[".config/ai/env"])
+        c = self.coord(a=a)
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            c.step_yadm()
+        lines = [x.strip() for x in buf.getvalue().splitlines()]
+        self.assertTrue(lines[0].startswith("would run [alpha] yadm-sync-all -u --no-decrypt alpha"), lines)
+        self.assertIn("take .config/ai/env from the archive", lines[1])
+        self.assertIn("yadm-reencrypt --changed", lines[2])
+        self.assertTrue(lines[3].startswith("would run [alpha] yadm-sync-all -u b"), lines)   # beta pulls, decrypts
 
 
 class UvTests(Base):
@@ -171,12 +220,13 @@ class UvTests(Base):
 
 class PackageTests(Base):
     def test_no_baseline_trusts_maintained_autoinstalled_only(self):
-        a = host_data("alpha", packages={"installed": ["bash", "git", "lib1", "lib2", "texlive", "steam", "kernel-x"],
-                                         "auto": ["bash", "git", "lib1", "lib2"], "repos": []})
+        a = host_data("alpha", packages={"installed": ["bash", "git", "lib1", "lib2", "lib3", "lib4", "texlive", "steam",
+                                                       "kernel-x", "sdbootutil"],
+                                         "auto": ["bash", "git", "lib1", "lib2", "lib3", "lib4"], "repos": []})
         b = host_data("beta", packages={"installed": ["bash", "git", "extra"], "auto": [], "repos": []})
         it = self.items(self.coord(a=a, b=b), "packages")
         fixes = sorted(i.text.split(":")[0] for i in it if i.fix)
-        self.assertEqual(fixes, ["texlive"])                     # steam only_on alpha, kernel-* ignored
+        self.assertEqual(fixes, ["steam", "texlive"])            # kernel-* ignored
         self.assertTrue(any("beta: no baseline" in i.text for i in it))
 
     def test_baseline_proposes_new_and_notes_removed(self):
@@ -186,6 +236,14 @@ class PackageTests(Base):
         it = self.items(self.coord(a=a, b=b, baseline=base), "packages")
         self.assertTrue(any(i.text.startswith("new:") and i.fix == "zypper install on beta" for i in it))
         self.assertTrue(any(i.text.startswith("gone:") and "removed on alpha" in i.text and not i.fix for i in it))
+
+
+    def test_maintained_autoinstalled_beats_an_old_baseline(self):
+        a = host_data("alpha", packages={"installed": ["l1", "l2", "l3", "steam"], "auto": ["l1", "l2", "l3"],
+                                         "repos": []})
+        base = {"packages": {"alpha": ["l1", "l2", "l3", "steam"], "beta": []}}
+        it = self.items(self.coord(a=a, baseline=base), "packages")
+        self.assertTrue(any(i.text.startswith("steam:") and i.fix for i in it))
 
 
 class LeaseAndTimerTests(Base):
@@ -221,6 +279,44 @@ class HostSideTests(unittest.TestCase):
                 wss.h_barrier_hash(argparse.Namespace(window_min=60, paths=[f"recent:{d}"], files=None))
             got = {Path(k).name for k in json.loads(buf.getvalue())}
             self.assertEqual(got, {"new.jsonl", "old.jsonl"})
+
+    def test_merged_into_and_on_other_remote_with_real_git(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                   "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_GLOBAL": "/dev/null"}
+            def g(*a, cwd=d + "/w"):
+                return subprocess.run(["git", *a], cwd=cwd, env=env, capture_output=True, text=True, check=True).stdout
+            subprocess.run(["git", "init", "-q", "--bare", "-b", "main", d + "/r.git"], check=True, env=env)
+            subprocess.run(["git", "clone", "-q", d + "/r.git", d + "/w"], check=True, env=env, capture_output=True)
+            w = Path(d) / "w"
+            def commit(name):
+                (w / name).write_text(name)
+                g("add", name)
+                g("commit", "-q", "-m", name)
+            g("checkout", "-q", "-b", "main")
+            commit("base")
+            g("push", "-q", "-u", "origin", "main")
+            g("checkout", "-q", "-b", "feat")
+            commit("f1")
+            g("push", "-q", "-u", "origin", "feat")
+            g("checkout", "-q", "main")
+            commit("m1")
+            g("push", "-q", "origin", "main")
+            g("checkout", "-q", "feat")
+            g("rebase", "-q", "main")                      # local feat now diverges from origin/feat
+            g("checkout", "-q", "main")
+            g("merge", "-q", "--ff-only", "feat")
+            g("push", "-q", "origin", "main")
+            g("fetch", "-q")
+            self.assertTrue(wss.merged_into(w, "feat", "origin/feat", "origin/main"))
+            g("checkout", "-q", "feat")
+            commit("f2")                                   # a new commit only on the local copy
+            self.assertFalse(wss.merged_into(w, "feat", "origin/feat", "origin/main"))
+            g("push", "-q", "origin", "feat:merge/f2")     # the same commit on a merge-request branch
+            g("fetch", "-q")
+            sha = g("rev-parse", "feat").strip()
+            self.assertEqual(wss.on_other_remote(w, sha, "origin/feat"), ["origin/merge/f2"])
 
     def test_stamp_lines(self):
         with tempfile.TemporaryDirectory() as d:

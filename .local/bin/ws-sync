@@ -175,6 +175,7 @@ def c_code(code_dir: Path) -> dict:
         r = g.parent
         refs = git_in(r, "for-each-ref", "--format=%(refname:short)\t%(objectname)\t%(upstream:short)\t"
                       "%(upstream:track,nobracket)", "refs/heads").stdout
+        default = git_in(r, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").stdout.strip()
         branches = {}
         for line in refs.splitlines():
             name, sha, up, track = (line.split("\t") + ["", "", "", ""])[:4]
@@ -184,6 +185,10 @@ def c_code(code_dir: Path) -> dict:
                   "behind": int(b.group(1)) if b else 0, "gone": "gone" in track}
             if not up:
                 br["unpushed"] = bool(git_in(r, "rev-list", "-n1", name, "--not", "--remotes").stdout.strip())
+            elif br["ahead"] and not br["behind"]:
+                br["on_remote"] = on_other_remote(r, sha, up)
+            elif br["ahead"] and br["behind"] and default:
+                br["merged"] = merged_into(r, name, up, default)
             branches[name] = br
         dirty = [x for x in git_in(r, "status", "--porcelain").stdout.splitlines() if x]
         repos[r.name] = {
@@ -196,6 +201,21 @@ def c_code(code_dir: Path) -> dict:
             "branches": branches,
         }
     return {"repos": repos, "exclude": exclude}
+
+
+def on_other_remote(repo: Path, sha: str, up: str) -> list[str]:
+    """Remote branches other than the upstream that already hold this commit (e.g. a merge-request branch)."""
+    out_ = git_in(repo, "branch", "-r", "--contains", sha, "--format=%(refname:short)").stdout.split()
+    return [b for b in out_ if b != up and not b.endswith("/HEAD")]
+
+
+def merged_into(repo: Path, branch: str, up: str, default: str) -> bool:
+    """A diverged branch whose own commits and whose upstream's commits all reached the default branch (by commit
+    or by an identical patch, e.g. after a rebase and merge): the local copy is only stale."""
+    for ref in (branch, up):
+        if any(line.startswith("+") for line in git_in(repo, "cherry", default, ref).stdout.splitlines()):
+            return False
+    return True
 
 
 YADM_REPO = HOME / ".local/share/yadm/repo.git"
@@ -435,9 +455,24 @@ def code_push(repo: Path, args: argparse.Namespace) -> int:
     for line in refs.splitlines():
         b, up, track = (line.split("\t") + ["", "", ""])[:3]
         if up:
+            if "ahead" in track and "behind" in track and "gone" not in track:
+                cur = git_in(repo, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip()
+                if default and b != cur and merged_into(repo, b, up, f"origin/{default}"):
+                    # Stale copy of a branch that reached the default branch: drop it (git's safe delete).
+                    git_in(repo, "branch", "--unset-upstream", b)
+                    d = git_in(repo, "branch", "-d", b)
+                    print(f"{repo.name}: {b} was fully merged into origin/{default}: local copy dropped"
+                          if d.returncode == 0 else f"{repo.name}: {b}: could not drop the merged copy")
+                    bad |= d.returncode != 0
+                else:
+                    print(f"{repo.name}: {b} diverged from {up}: resolve by hand (never force-pushed)")
+                continue
             if "ahead" not in track or "behind" in track or "gone" in track:
-                if "ahead" in track and "behind" in track:
-                    print(f"{repo.name}: {b} diverged from {up}: resolve by hand")
+                continue
+            sha = git_in(repo, "rev-parse", b).stdout.strip()
+            elsewhere = on_other_remote(repo, sha, up)
+            if elsewhere:
+                print(f"{repo.name}: {b} is already on {', '.join(elsewhere[:2])}: not pushed to {up}")
                 continue
             if b == default and not args.push_default:
                 print(f"{repo.name}: {b} has unpushed commits (default branch; not pushed in this mode)")
@@ -650,7 +685,10 @@ class Coordinator:
         return self.peer if h is self.me else self.me
 
     def only_on(self, section: str, host: str) -> list[str]:
-        return self.cfg.get(section, {}).get("only_on", {}).get(host, [])
+        """Host-specific config: items that would break or misbehave on the other machine (boot loader, the
+        schulpc-only nightly jobs). `only_on` is the older name of the same table."""
+        sec = self.cfg.get(section, {})
+        return (sec.get("host_specific") or sec.get("only_on") or {}).get(host, [])
 
     def ignore(self, section: str) -> list[str]:
         return self.cfg.get(section, {}).get("ignore", [])
@@ -799,7 +837,7 @@ class Coordinator:
                 self.add("yadm", f"{h.name}: {y['behind']} commits behind origin", fix="yadm-sync-all")
             if y.get("ahead"):
                 self.add("yadm", f"{h.name}: {y['ahead']} unpushed yadm commits",
-                         fix="yadm push" if not self.auto else "")
+                         fix="yadm push" if not y.get("behind") else "")
             keep = self.cfg.get("yadm", {}).get("ignore_dirty", {}).get(h.name, [])
             dirty = [f for f in y.get("dirty", []) if f != ".agents/session-handoff.md" and not match_any(f, keep)]
             if dirty:
@@ -812,18 +850,11 @@ class Coordinator:
                 self.add("secrets", f"{h.name}: missing {', '.join(s['missing'])}", fix="decrypt")
             if s["older_local"]:
                 self.add("secrets", f"{h.name}: older than the archive: {', '.join(s['older_local'])}", fix="decrypt")
-            vol, newer = self.split_volatile(s["newer_local"])
-            if vol:
-                self.add("secrets", f"{h.name}: rewritten by their tools since the last archive commit (kept "
-                         f"across decrypts): {', '.join(vol)}", "info")
-            if newer:
+            if s["newer_local"]:
+                both = len(self.secret_editors()) == 2
                 self.add("secrets", f"{h.name}: edited after the last archive commit, not encrypted yet: "
-                         f"{', '.join(newer)} (on {h.name}: yadm-reencrypt --changed; ws-sync will not "
-                         "decrypt over it)", "warn")
-
-    def split_volatile(self, files: list[str]) -> tuple[list[str], list[str]]:
-        volatile = self.cfg.get("secrets", {}).get("volatile", [])
-        return [f for f in files if match_any(f, volatile)], [f for f in files if not match_any(f, volatile)]
+                         f"{', '.join(s['newer_local'])}" + (" (both machines hold edits: merge by hand)" if both else ""),
+                         "warn" if both else "drift", fix="" if both else f"yadm-reencrypt --changed on {h.name}")
 
     def a_code(self) -> None:
         A, B = self.me.data["code"], self.peer.data["code"]
@@ -843,12 +874,28 @@ class Coordinator:
                     continue
                 if r["dirty"]:
                     files = ", ".join(r["dirty_files"][:3]) + (" ..." if r["dirty"] > 3 else "")
-                    self.add("code", f"{name}: {r['dirty']} uncommitted on {h.name} ({files})", "warn")
+                    if match_any(name, self.cfg.get("code", {}).get("read_only", [])):
+                        self.add("code", f"{name}: {r['dirty']} uncommitted on {h.name} ({files}); remote is read-only "
+                                 "(archived), so they stay local", "info")
+                    else:
+                        self.add("code", f"{name}: {r['dirty']} uncommitted on {h.name} ({files})", "warn")
                 if r["stash"]:
                     self.add("code", f"{name}: {r['stash']} stash entries on {h.name}", "info")
                 for b, br in r["branches"].items():
+                    ro = match_any(name, self.cfg.get("code", {}).get("read_only", []))
                     if br["up"] and br["ahead"] and br["behind"]:
-                        self.add("code", f"{name}: {b} diverged on {h.name}", "warn")
+                        if br.get("merged") and b != r["current"] and not self.auto:
+                            self.add("code", f"{name}: {b} diverged on {h.name}, but everything in it is already in "
+                                     f"origin/{r['default']} (stale copy)", fix=f"drop the merged local copy on {h.name}")
+                        else:
+                            self.add("code", f"{name}: {b} diverged from {br['up']} on {h.name}: resolve by hand "
+                                     "(ws-sync never force-pushes)", "warn")
+                    elif br["up"] and br["ahead"] and br.get("on_remote"):
+                        self.add("code", f"{name}: {b} {br['ahead']} ahead of {br['up']} on {h.name}, already on "
+                                 f"{', '.join(br['on_remote'][:2])} (waiting for a merge there; not pushed to {br['up']})",
+                                 "info")
+                    elif br["up"] and br["ahead"] and ro:
+                        self.add("code", f"{name}: {b} {br['ahead']} unpushed on {h.name} (read-only remote)", "warn")
                     elif br["up"] and br["ahead"]:
                         default = b == r["default"]
                         can = self.push_allowed(default, untracked=False) and self.remote_ok(r["origin"])
@@ -873,7 +920,7 @@ class Coordinator:
                             self.add("code", f"{name}: {b} differs between the machines", fix="fetch and fast-forward")
 
     def remote_ok(self, url: str) -> bool:
-        return match_any(url, self.cfg.get("code", {}).get("push_remotes", []))
+        return match_any(url, self.cfg.get("code", {}).get("push_remotes", ["*"]))
 
     def push_allowed(self, default: bool, untracked: bool) -> bool:
         if self.auto:
@@ -961,11 +1008,12 @@ class Coordinator:
         """Packages a host asked for since the last baseline (None: unknown for this host)."""
         p = h.data["packages"]
         inst, auto = set(p["installed"]), set(p["auto"])
+        # zypper's AutoInstalled list, where it is maintained (most packages listed), says exactly what was asked
+        # for. Elsewhere (an installer that marked nothing) only what arrived since the last full sync counts.
+        if len(auto) > 0.5 * max(len(inst), 1):
+            return inst - auto
         base = self.baseline().get("packages", {}).get(h.name)
-        if base is not None:
-            return inst - auto - set(base)
-        # No baseline yet: trust zypper's AutoInstalled only where it is maintained (most packages listed).
-        return inst - auto if len(auto) > 0.5 * max(len(inst), 1) else None
+        return inst - auto - set(base) if base is not None else None
 
     def a_packages(self) -> None:
         ignore = self.ignore("packages")
@@ -1136,47 +1184,66 @@ class Coordinator:
                  f"{self.me.name} {len(rc_a.get('running', []))}, {self.peer.name} {len(rc_b.get('running', []))}")
 
     # -- steps --
+    def yadm_sync_all(self, hosts: list[Host], decrypt: bool) -> bool:
+        aliases = [h.ssh for h in hosts]
+        flags = "-u" + ("" if decrypt else " --no-decrypt")
+        # YADM_SYNC_SELF: this machine's alias runs locally (no SSH loop through its own tunnel).
+        return self.act(self.me, f"yadm-sync-all {flags} {' '.join(aliases)}",
+                        f"YADM_SYNC_SELF={shlex.quote(self.me.ssh)} yadm-sync-all {flags} "
+                        f"{' '.join(shlex.quote(a) for a in aliases)}", env=True, timeout=900)
+
+    def secret_editors(self) -> list[Host]:
+        return [h for h in self.hosts() if h.data["yadm"].get("present")
+                and h.data["yadm"].get("secrets", {}).get("newer_local")]
+
     def step_yadm(self) -> None:
-        plan: dict[str, bool] = {}
-        keep: dict[str, list[str]] = {}
+        """Secret edits first: the machine that made them pulls without decrypting, takes from the archive what
+        is newer there, re-encrypts, commits and pushes (yadm-reencrypt --changed). Then every machine that is
+        behind pulls and decrypts."""
+        done: set[str] = set()
+        editors = self.secret_editors()
         for h in self.hosts():
             y = h.data["yadm"]
-            if not y.get("present"):
-                continue
-            s = y.get("secrets", {})
-            vol, newer = self.split_volatile(s.get("newer_local", []))
-            need = bool(y.get("behind") or s.get("missing") or s.get("older_local"))
-            if need:
-                plan[h.name] = not newer
-                if vol and not newer:
-                    keep[h.name] = vol
-        for h in self.hosts():
-            y = h.data["yadm"]
-            if y.get("ahead") and not y.get("behind") and not self.auto:
+            if y.get("ahead") and not y.get("behind"):
                 self.act(h, "yadm push (unpushed yadm commits)", "git --git-dir=$HOME/.local/share/yadm/repo.git push "
                          "--quiet origin HEAD:master", timeout=180)
-                plan.setdefault(self.other(h).name, True)
-        if not plan:
+        if len(editors) == 1:
+            h = editors[0]
+            y, s = h.data["yadm"], h.data["yadm"]["secrets"]
+            ok = True
+            if y.get("behind"):
+                ok = self.yadm_sync_all([h], decrypt=False)
+            older = s.get("older_local", []) + s.get("missing", [])
+            if ok and older:
+                q = " ".join(shlex.quote(f) for f in older)
+                ok = self.act(h, f"take {', '.join(older)} from the archive (newer there)",
+                              'cd "$HOME" && umask 077 && gpg --batch --quiet --decrypt .local/share/yadm/archive '
+                              f"| tar xpf - -- {q}", timeout=120)
+            if ok:
+                ok = self.act(h, f"yadm-reencrypt --changed ({', '.join(s['newer_local'])}): commit and push",
+                              "yadm-reencrypt --changed", env=True, timeout=300)
+            done.add(h.name)
+            if ok:
+                o = self.other(h)
+                if o.data["yadm"].get("present") and not o.data["yadm"].get("secrets", {}).get("newer_local"):
+                    self.yadm_sync_all([o], decrypt=True)
+                    done.add(o.name)
+        elif len(editors) == 2:
+            self.say("  yadm: both machines hold secret edits that are not in the archive; nothing re-encrypted "
+                     "(copy one machine's edit to the other, then run ws-sync sync again)")
+            self.failures.append("yadm: secret edits on both machines")
+        plan: dict[bool, list[Host]] = {}
+        for h in self.hosts():
+            y = h.data["yadm"]
+            if h.name in done or not y.get("present"):
+                continue
+            s = y.get("secrets", {})
+            if y.get("behind") or s.get("missing") or s.get("older_local"):
+                plan.setdefault(not s.get("newer_local"), []).append(h)
+        for decrypt, hosts in plan.items():
+            self.yadm_sync_all(hosts, decrypt)
+        if not plan and not done:
             self.say("  yadm: nothing to do")
-            return
-        # Volatile files (token caches) newer than the archive survive the decrypt: copied aside, restored.
-        kdir = "${XDG_STATE_HOME:-$HOME/.local/state}/ws-sync/keep"
-        for name, files in keep.items():
-            q = " ".join(shlex.quote(f) for f in files)
-            self.act(self.host_by(name), f"keep {', '.join(files)} across the decrypt",
-                     f'umask 077; mkdir -p "{kdir}" && cd "$HOME" && tar cf "{kdir}/volatile.tar" -- {q}', timeout=60)
-        groups: dict[bool, list[str]] = {}
-        for name, decrypt in plan.items():
-            groups.setdefault(decrypt, []).append(self.cfg["hosts"][name].get("ssh", name))
-        for decrypt, aliases in groups.items():
-            flags = "-u" + ("" if decrypt else " --no-decrypt")
-            # YADM_SYNC_SELF: this machine's alias runs locally (no SSH loop through its own tunnel).
-            self.act(self.me, f"yadm-sync-all {flags} {' '.join(aliases)}",
-                     f"YADM_SYNC_SELF={shlex.quote(self.me.ssh)} yadm-sync-all {flags} "
-                     f"{' '.join(shlex.quote(a) for a in aliases)}", env=True, timeout=900)
-        for name, files in keep.items():
-            self.act(self.host_by(name), f"restore {', '.join(files)}",
-                     f'cd "$HOME" && tar xpf "{kdir}/volatile.tar" && rm -f "{kdir}/volatile.tar"', timeout=60)
 
     def step_code(self) -> None:
         A, B = self.me.data["code"], self.peer.data["code"]
@@ -1186,6 +1253,9 @@ class Coordinator:
             if it.section != "code" or not it.fix:
                 continue
             repo = it.text.split(":")[0]
+            if it.fix.startswith("drop the merged local copy"):
+                touched.add(repo)
+                continue
             if it.fix.startswith("clone on"):
                 tgt = it.fix.removeprefix("clone on ").strip()
                 src = A if tgt == self.peer.name else B
@@ -1211,9 +1281,10 @@ class Coordinator:
                 continue
             extra = (["--push-default"] if pd else []) + (["--push-untracked"] if pu else [])
             extra += [f"--push-remote={g}" for g in c.get("push_remotes", [])]
-            if self.push_allowed(False, False):
-                self.act_py(h, f"push where needed ({len(names)} repos)", "code-refresh", "--phase", "push",
-                            "--code-dir", code_dir, *extra, *names, timeout=3600)
+            pnames = [r for r in names if not match_any(r, c.get("read_only", []))]
+            if self.push_allowed(False, False) and pnames:
+                self.act_py(h, f"push where needed ({len(pnames)} repos)", "code-refresh", "--phase", "push",
+                            "--code-dir", code_dir, *extra, *pnames, timeout=3600)
         for h in self.hosts():
             names = [r for r in repos if r in h.data["code"]["repos"]]
             if names:
@@ -1290,8 +1361,8 @@ class Coordinator:
             h = self.host_by(name)
             q = " ".join(shlex.quote(p) for p in pkgs)
             # One transaction first; if zypper refuses it (a package not in this host's repos), one by one.
-            script = (f"sudo -n zypper --non-interactive install --no-recommends -- {q} || "
-                      f"{{ rc=0; for p in {q}; do sudo -n zypper --non-interactive install --no-recommends -- \"$p\" "
+            script = (f"sudo -n zypper --non-interactive install --auto-agree-with-licenses --no-recommends -- {q} || "
+                      f"{{ rc=0; for p in {q}; do sudo -n zypper --non-interactive install --auto-agree-with-licenses --no-recommends -- \"$p\" "
                       f">/dev/null 2>&1 && echo \"installed $p\" || {{ echo \"failed: $p\"; rc=1; }}; done; exit $rc; }}")
             self.act(h, f"zypper install {len(pkgs)} packages: {', '.join(pkgs[:12])}{' ...' if len(pkgs) > 12 else ''}",
                      script, timeout=3600)
