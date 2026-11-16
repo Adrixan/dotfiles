@@ -1,0 +1,668 @@
+#!/usr/bin/env python3
+"""aspirations: start one project idea from Peter's Nextcloud task list each week, without an agent.
+
+Peter, 2026-11-16 (via the Greeter): "I've created a task "Aspirational" in my task list. this holds a list of
+subtasks that represent various project ideas. Schedule each sunday at 05:00 to check the list, pick an idea
+according to priority, read its note and subtask and start working on it."
+
+One run (user timer, Sunday 05:00 Europe/Vienna; Ansible ai_workstation tasks/aspirations.yml):
+  1. read every VTODO of the configured CalDAV calendar and find the parent task (by its title)
+  2. pick the open idea (direct subtask) with the highest priority (iCalendar 1 = highest, 9 = lowest,
+     0 or none = after 9); ties go to the oldest (CREATED); ideas that are done, cancelled, in progress,
+     partly complete, carry the started category or are in the local started list are skipped
+  3. start an rc session with a brief (title, Peter's note, the idea's own subtasks, the working rules):
+     category "research" -> rc research; "code:<repo>" or a title whose slug names an existing ~/code
+     folder -> rc code <repo> --fresh; else rc code --new <slug>; "model:<m>" adds --model <m>
+  4. mark the idea IN-PROCESS (status, category, one note line) so the next run picks another
+  5. mail Peter through the Nextcloud server of mcp-shared (127.0.0.1:8790) which idea started
+
+rc's RAM guard is respected (never --force): a refused start is retried every retry_interval until
+retry_window has passed. A role that is already running is not touched; the run waits for it the same way.
+Exit codes: 0 started or nothing open, 1 failure (mailed), 2 usage, 5 another run holds the lock.
+
+Config (private, Syncthing): ~/sync/ai/aspirations/config.toml (ASPIRATIONS_CONFIG overrides).
+Log: ~/.local/state/aspirations/aspirations.log plus the journal. Needs python3 (3.11+) and rc only.
+Tests: python3 -I ~/.local/share/aspirations/test_aspirations.py
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import tomllib
+import unicodedata
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+VERSION = "1.0"
+HOME = Path.home()
+CONFIG = Path(os.environ.get("ASPIRATIONS_CONFIG", HOME / "sync/ai/aspirations/config.toml"))
+STATE = Path(os.environ.get("ASPIRATIONS_STATE", Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "aspirations"))
+ENV_FILE = HOME / ".config/ai/env"
+EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_BUSY = 0, 1, 2, 5
+BRIEF_MAX = 19000          # rc accepts 20000 characters
+PART_MAX = 6000            # per note or subtask description
+DONE_STATUSES = {"COMPLETED", "CANCELLED", "IN-PROCESS"}
+RETRYABLE = re.compile(r"MB RAM available|lease|is already running|runs on (the other|schulpc|xps)", re.I)
+TRANSLIT = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "Ä": "Ae", "Ö": "Oe", "Ü": "Ue", "ß": "ss"})
+
+
+# --- config -----------------------------------------------------------------------------------------------
+
+@dataclass
+class Config:
+    calendar: str = "tasks"
+    parent: str = "Aspirations"
+    started_category: str = "aspiration-started"
+    rc: str = str(HOME / ".local/bin/rc")
+    code_dir: str = str(HOME / "code")
+    ttl: str = "12h"
+    research_ttl: str = "8h"
+    retry_interval_min: int = 10
+    retry_window_min: int = 360
+    notify_empty: bool = True
+    mail_url: str = "http://127.0.0.1:8790/servers/nextcloud/mcp"
+    mail_account_id: int = 0
+    mail_to_name: str = ""
+    mail_to_email: str = ""
+
+
+def load_config(path: Path) -> Config:
+    raw: dict[str, Any] = tomllib.loads(path.read_text()) if path.exists() else {}
+    cfg = Config()
+    tasks, sessions, mail = raw.get("tasks", {}), raw.get("sessions", {}), raw.get("mail", {})
+    cfg.calendar = str(tasks.get("calendar", cfg.calendar))
+    cfg.parent = str(tasks.get("parent", cfg.parent))
+    cfg.started_category = str(tasks.get("started_category", cfg.started_category))
+    cfg.rc = os.path.expanduser(str(sessions.get("rc", cfg.rc)))
+    cfg.code_dir = os.path.expanduser(str(sessions.get("code_dir", cfg.code_dir)))
+    cfg.ttl = str(sessions.get("ttl", cfg.ttl))
+    cfg.research_ttl = str(sessions.get("research_ttl", cfg.research_ttl))
+    cfg.retry_interval_min = int(sessions.get("retry_interval_min", cfg.retry_interval_min))
+    cfg.retry_window_min = int(sessions.get("retry_window_min", cfg.retry_window_min))
+    cfg.notify_empty = bool(mail.get("notify_empty", cfg.notify_empty))
+    cfg.mail_url = str(mail.get("mcp_url", cfg.mail_url))
+    cfg.mail_account_id = int(mail.get("account_id", 0))
+    cfg.mail_to_name = str(mail.get("to_name", ""))
+    cfg.mail_to_email = str(mail.get("to_email", ""))
+    if not cfg.rc.startswith("/"):
+        raise ValueError("sessions.rc must be an absolute path")
+    if not re.fullmatch(r"\d+[hm]", cfg.ttl) or not re.fullmatch(r"\d+[hm]", cfg.research_ttl):
+        raise ValueError("sessions.ttl and research_ttl look like 12h or 90m")
+    return cfg
+
+
+def load_env(path: Path = ENV_FILE) -> dict[str, str]:
+    """NEXTCLOUD_* from the environment, else from ~/.config/ai/env (export KEY="value" lines; never executed)."""
+    keys = ("NEXTCLOUD_HOST", "NEXTCLOUD_USERNAME", "NEXTCLOUD_PASSWORD")
+    found = {k: os.environ[k] for k in keys if os.environ.get(k)}
+    if len(found) < len(keys) and path.exists():
+        for line in path.read_text().splitlines():
+            m = re.match(r'^\s*(?:export\s+)?(NEXTCLOUD_[A-Z_]+)=(.*)$', line)
+            if m and m.group(1) in keys and m.group(1) not in found:
+                value = m.group(2).strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                found[m.group(1)] = value
+    missing = [k for k in keys if not found.get(k)]
+    if missing:
+        raise RuntimeError(f"missing {', '.join(missing)} (environment or {path})")
+    return found
+
+
+# --- iCalendar --------------------------------------------------------------------------------------------
+
+def unfold(text: str) -> list[str]:
+    return re.sub(r"\r?\n[ \t]", "", text).replace("\r\n", "\n").split("\n")
+
+
+def fold(line: str) -> str:
+    """RFC 5545 folding at 75 octets without splitting a UTF-8 sequence."""
+    out, cur, size = [], "", 0
+    for ch in line:
+        n = len(ch.encode())
+        if size + n > (75 if not out else 74):
+            out.append(cur)
+            cur, size = "", 0
+        cur += ch
+        size += n
+    out.append(cur)
+    return "\r\n ".join(out)
+
+
+def split_prop(line: str) -> tuple[str, dict[str, str], str]:
+    """'NAME;P=V:value' -> (NAME, {P: V}, value); colons inside quoted parameter values are kept."""
+    i, quoted = 0, False
+    while i < len(line):
+        if line[i] == '"':
+            quoted = not quoted
+        elif line[i] == ":" and not quoted:
+            break
+        i += 1
+    head, value = line[:i], line[i + 1:]
+    name, *params = head.split(";")
+    pdict = {}
+    for p in params:
+        k, _, v = p.partition("=")
+        pdict[k.upper()] = v.strip('"')
+    return name.upper(), pdict, value
+
+
+def unescape(value: str) -> str:
+    return re.sub(r"\\([\\;,nN])", lambda m: "\n" if m.group(1) in "nN" else m.group(1), value)
+
+
+def escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def split_list(value: str) -> list[str]:
+    return [unescape(p).strip() for p in re.split(r"(?<!\\),", value) if p.strip()]
+
+
+@dataclass
+class Todo:
+    uid: str
+    href: str
+    etag: str
+    summary: str = ""
+    description: str = ""
+    status: str = ""
+    priority: int = 0
+    percent: int = 0
+    created: str = ""
+    completed: bool = False
+    parent: str = ""
+    categories: list[str] = field(default_factory=list)
+
+    @property
+    def rank(self) -> tuple[int, str, str]:
+        return (self.priority if 1 <= self.priority <= 9 else 10, self.created or "99999999T999999Z", self.summary.lower())
+
+
+def parse_todos(ics: str, href: str = "", etag: str = "") -> list[Todo]:
+    todos, cur = [], None
+    for line in unfold(ics):
+        if line == "BEGIN:VTODO":
+            cur = Todo(uid="", href=href, etag=etag)
+            continue
+        if line == "END:VTODO" and cur is not None:
+            if cur.uid:
+                todos.append(cur)
+            cur = None
+            continue
+        if cur is None or not line:
+            continue
+        name, params, value = split_prop(line)
+        if name == "UID":
+            cur.uid = value.strip()
+        elif name == "SUMMARY":
+            cur.summary = unescape(value).strip()
+        elif name == "DESCRIPTION":
+            cur.description = unescape(value)
+        elif name == "STATUS":
+            cur.status = value.strip().upper()
+        elif name == "PRIORITY":
+            cur.priority = int(value) if value.strip().isdigit() else 0
+        elif name == "PERCENT-COMPLETE":
+            cur.percent = int(value) if value.strip().isdigit() else 0
+        elif name == "CREATED" or (name == "DTSTAMP" and not cur.created):
+            cur.created = value.strip()
+        elif name == "COMPLETED":
+            cur.completed = True
+        elif name == "RELATED-TO" and params.get("RELTYPE", "PARENT").upper() == "PARENT":
+            cur.parent = value.strip()
+        elif name == "CATEGORIES":
+            cur.categories += split_list(value)
+    return todos
+
+
+def mark_started(ics: str, uid: str, category: str, note: str, now: datetime) -> str:
+    """Return the calendar object with the VTODO `uid` set IN-PROCESS, the category added and `note` appended."""
+    stamp = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    lines, out, block = unfold(ics.rstrip("\r\n")), [], None
+    for line in lines:
+        if line == "BEGIN:VTODO":
+            block = [line]
+            continue
+        if block is None:
+            out.append(line)
+            continue
+        if line != "END:VTODO":
+            block.append(line)
+            continue
+        if not any(split_prop(b)[0] == "UID" and split_prop(b)[2].strip() == uid for b in block[1:]):
+            out += block + [line]
+            block = None
+            continue
+        seen: set[str] = set()
+        new_block = [block[0]]
+        for b in block[1:]:
+            name, _, value = split_prop(b)
+            if name in ("STATUS", "LAST-MODIFIED", "DTSTAMP"):
+                if name not in seen:
+                    new_block.append(f"{name}:{'IN-PROCESS' if name == 'STATUS' else stamp}")
+                seen.add(name)
+            elif name == "SEQUENCE":
+                new_block.append(f"SEQUENCE:{int(value) + 1 if value.strip().isdigit() else 1}")
+                seen.add(name)
+            elif name == "DESCRIPTION" and "DESCRIPTION" not in seen:
+                head = b[: len(b) - len(value)]
+                new_block.append(head + (value + "\\n\\n" if value else "") + escape(note))
+                seen.add(name)
+            elif name == "CATEGORIES" and "CATEGORIES" not in seen:
+                cats = split_list(value)
+                new_block.append(b if category in cats else f"{b},{escape(category)}")
+                seen.add(name)
+            else:
+                new_block.append(b)
+        for name, line_ in (("STATUS", "STATUS:IN-PROCESS"), ("LAST-MODIFIED", f"LAST-MODIFIED:{stamp}"),
+                            ("DTSTAMP", f"DTSTAMP:{stamp}"), ("DESCRIPTION", f"DESCRIPTION:{escape(note)}"),
+                            ("CATEGORIES", f"CATEGORIES:{escape(category)}")):
+            if name not in seen:
+                new_block.append(line_)
+        out += new_block + [line]
+        block = None
+    return "\r\n".join(fold(x) for x in out) + "\r\n"
+
+
+# --- CalDAV -----------------------------------------------------------------------------------------------
+
+class CalDAV:
+    def __init__(self, env: dict[str, str], calendar: str, opener: Callable[..., Any] = urllib.request.urlopen):
+        host = env["NEXTCLOUD_HOST"].rstrip("/")
+        if not host.startswith("https://"):
+            raise RuntimeError("NEXTCLOUD_HOST must be an https URL")
+        self.host = host
+        self.base = f"{host}/remote.php/dav/calendars/{env['NEXTCLOUD_USERNAME']}/{calendar}/"
+        self.auth = "Basic " + base64.b64encode(f"{env['NEXTCLOUD_USERNAME']}:{env['NEXTCLOUD_PASSWORD']}".encode()).decode()
+        self.opener = opener
+
+    def _req(self, method: str, url: str, body: bytes | None = None, headers: dict[str, str] | None = None) -> tuple[int, dict[str, str], str]:
+        h = {"Authorization": self.auth, "User-Agent": "aspirations/" + VERSION, **(headers or {})}
+        req = urllib.request.Request(url, data=body, method=method, headers=h)
+        try:
+            with self.opener(req, timeout=60) as resp:
+                return resp.status, dict(resp.headers.items()), resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            return exc.code, dict(exc.headers.items()) if exc.headers else {}, exc.read().decode("utf-8", "replace")
+
+    def todos(self) -> tuple[list[Todo], dict[str, str]]:
+        body = (b'<?xml version="1.0" encoding="utf-8"?><c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+                b'<d:prop><d:getetag/><c:calendar-data/></d:prop><c:filter><c:comp-filter name="VCALENDAR">'
+                b'<c:comp-filter name="VTODO"/></c:comp-filter></c:filter></c:calendar-query>')
+        status, _, text = self._req("REPORT", self.base, body, {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
+        if status != 207:
+            raise RuntimeError(f"CalDAV REPORT {self.base} returned HTTP {status}")
+        ns = {"d": "DAV:", "c": "urn:ietf:params:xml:ns:caldav"}
+        todos, raw = [], {}
+        for resp in ET.fromstring(text).findall("d:response", ns):  # noqa: S314 (own server over https; expat fetches no external entities)
+            href = (resp.findtext("d:href", "", ns) or "").strip()
+            etag = (resp.findtext(".//d:getetag", "", ns) or "").strip()
+            data = resp.findtext(".//c:calendar-data", "", ns) or ""
+            if not data:
+                continue
+            raw[href] = data
+            todos += parse_todos(data, href, etag)
+        return todos, raw
+
+    def put(self, href: str, ics: str, etag: str) -> None:
+        url = self.host + href if href.startswith("/") else href
+        if not url.startswith(self.base):
+            raise RuntimeError(f"refusing to write outside the calendar: {href}")
+        status, _, text = self._req("PUT", url, ics.encode(), {"Content-Type": "text/calendar; charset=utf-8", "If-Match": etag})
+        if status not in (200, 201, 204):
+            raise RuntimeError(f"CalDAV PUT returned HTTP {status}: {text[:200]}")
+
+
+# --- selection, routing, brief ----------------------------------------------------------------------------
+
+def find_parent(todos: list[Todo], title: str) -> Todo:
+    hits = [t for t in todos if t.summary.casefold() == title.casefold() and not t.parent]
+    if not hits:
+        hits = [t for t in todos if t.summary.casefold() == title.casefold()]
+    if len(hits) != 1:
+        raise RuntimeError(f"expected one task titled {title!r}, found {len(hits)}")
+    return hits[0]
+
+
+def children(todos: list[Todo], uid: str) -> list[Todo]:
+    return sorted((t for t in todos if t.parent == uid), key=lambda t: t.rank)
+
+
+def is_open(t: Todo, category: str, started: set[str]) -> tuple[bool, str]:
+    if t.completed or t.status in DONE_STATUSES:
+        return False, (t.status or "COMPLETED").lower()
+    if t.percent > 0:
+        return False, f"{t.percent}% done"
+    if category.casefold() in (c.casefold() for c in t.categories):
+        return False, f"category {category}"
+    if t.uid in started:
+        return False, "started earlier (local list)"
+    return True, ""
+
+
+def slugify(title: str) -> str:
+    s = unicodedata.normalize("NFKD", title.translate(TRANSLIT)).encode("ascii", "ignore").decode().lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:35].strip("-")
+    return s
+
+
+@dataclass
+class Route:
+    kind: str          # code-new | code | research
+    target: str        # project folder name or research topic
+    args: list[str]
+
+    def command(self, rc: str) -> list[str]:
+        if self.kind == "code-new":
+            return [rc, "code", "--new", self.target, *self.args, "--brief", "-"]
+        if self.kind == "code":
+            return [rc, "code", self.target, *self.args, "--brief", "-"]
+        return [rc, "research", self.target, *self.args, "--brief", "-"]
+
+    def role(self) -> str:
+        return f"code-{self.target}" if self.kind != "research" else f"research-{slugify(self.target)[:31].rstrip('-')}"
+
+
+def route_for(idea: Todo, cfg: Config) -> Route:
+    cats = {c.split(":", 1)[0].strip().casefold(): (c.split(":", 1)[1].strip() if ":" in c else "") for c in idea.categories}
+    extra: list[str] = []
+    if cats.get("model"):
+        extra += ["--model", cats["model"]]
+    if "research" in cats:
+        topic = re.sub(r"\s+", " ", idea.summary).strip()[:300] or idea.uid
+        return Route("research", topic, ["--ttl", cfg.research_ttl, *extra])
+    repo = cats.get("code", "")
+    if repo:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}", repo) or not (Path(cfg.code_dir) / repo).is_dir():
+            raise RuntimeError(f"category code:{repo} names no folder in {cfg.code_dir}")
+        return Route("code", repo, ["--fresh", "--ttl", cfg.ttl, *extra])
+    slug = slugify(idea.summary)
+    if not slug:
+        raise RuntimeError(f"cannot derive a project name from {idea.summary!r}: add a category code:<name>")
+    if (Path(cfg.code_dir) / slug).is_dir():
+        return Route("code", slug, ["--fresh", "--ttl", cfg.ttl, *extra])
+    return Route("code-new", slug, ["--ttl", cfg.ttl, *extra])
+
+
+def clip(text: str, limit: int = PART_MAX) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + "\n[... cut by the aspirations job; the full text is in the task]"
+
+
+def subtree(todos: list[Todo], uid: str, depth: int = 0) -> list[str]:
+    lines = []
+    for c in children(todos, uid):
+        done = "x" if (c.completed or c.status == "COMPLETED") else " "
+        status = c.status.lower() if c.status and c.status != "NEEDS-ACTION" else "open"
+        lines.append(f"{'  ' * depth}- [{done}] {c.summary} (status {status}{f', priority {c.priority}' if c.priority else ''})")
+        if c.description.strip():
+            lines += [f"{'  ' * depth}  > {x}" for x in clip(c.description, 2000).splitlines()]
+        if depth < 4:
+            lines += subtree(todos, c.uid, depth + 1)
+    return lines
+
+
+def build_brief(idea: Todo, todos: list[Todo], route: Route, cfg: Config, now: datetime) -> str:
+    sub = subtree(todos, idea.uid) or ["(none)"]
+    where = {"code-new": f"a new project ~/code/{route.target} (created by rc with a minimal AGENTS.md)",
+             "code": f"the existing project ~/code/{route.target}",
+             "research": "a deep research topic"}[route.kind]
+    brief = f"""[aspirations] Weekly project idea from Peter's Nextcloud task list "{cfg.parent}" (calendar "{cfg.calendar}"), \
+picked by the aspirations job on {now.strftime('%Y-%m-%d %H:%M')} (priority {idea.priority or 'none'}; highest open priority, ties to the oldest). \
+Peter's standing order (2026-11-16): "pick an idea according to priority, read its note and subtask and start working on it." \
+This session works on it autonomously in {where}.
+
+Idea: {idea.summary}
+Task UID: {idea.uid} (the job marked it IN-PROCESS with the category {cfg.started_category}; leave the task list to Peter)
+
+Peter's note, verbatim:
+<<<
+{clip(idea.description) or '(no note)'}
+>>>
+
+Subtasks of the idea, verbatim:
+{chr(10).join(sub)}
+
+How to work:
+- First call PushNotification once (load it with ToolSearch "select:PushNotification" if deferred): "Aspiration started: {idea.summary[:60]}".
+- The global rules, the knowledge map and the project's AGENTS.md apply as in any session. For a new project: write AGENTS.md \
+(goal, stack, conventions, commands), keep .agents/ state, commit and push as you go (Conventional Commits; a new GitHub repository is private).
+- Instructions in the note about models (for example a concept by one model and code by another) are followed with the Agent tool's \
+model override for that part; if that is not possible, say so in the handoff.
+- Files the note points to (for example under ~/Downloads) can hold personal or financial data such as voucher codes: read them \
+locally, never commit them, never send them to an external service; use synthetic samples in the repository.
+- Anything that needs Peter's approval goes to "Open decisions" in .agents/session-handoff.md and into one AskUserQuestion: spending \
+money, publishing or deploying anywhere, creating or using accounts or registrations, client or billable actions, messages to other \
+people, making a repository public, dropping scope or a breaking architecture choice. Do not wait for the answer: continue with \
+everything that does not depend on it.
+- When the work is done or only Peter's decisions are left: write .agents/session-handoff.md (trajectory, done, open decisions, next \
+steps), commit and push it, then run `rc handoff-done --stop`. The role stops by itself after {route.args[route.args.index('--ttl') + 1]}, \
+so commit and update the handoff at each milestone.
+"""
+    if len(brief) > BRIEF_MAX:
+        raise RuntimeError(f"brief has {len(brief)} characters (max {BRIEF_MAX}): shorten the note or the subtasks")
+    return brief
+
+
+# --- run --------------------------------------------------------------------------------------------------
+
+class Log:
+    def __init__(self, path: Path | None):
+        self.path = path
+        if path:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    def __call__(self, msg: str) -> None:
+        line = f"{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+        print(line, flush=True)
+        if self.path:
+            with self.path.open("a") as f:
+                f.write(line + "\n")
+
+
+def load_started(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_started(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    tmp.replace(path)
+
+
+def role_active(role: str) -> bool:
+    r = subprocess.run(["/usr/bin/systemctl", "--user", "is-active", "--quiet", f"claude-remote-control@{role}.service"], check=False)
+    return r.returncode == 0
+
+
+def start_session(route: Route, brief: str, cfg: Config, log: Log, *, runner: Callable[..., Any] = subprocess.run,
+                  active: Callable[[str], bool] = role_active, sleep: Callable[[float], None] = time.sleep,
+                  clock: Callable[[], float] = time.monotonic) -> tuple[bool, str, str]:
+    """Start the rc session, retrying refusals (RAM guard, lease, running role) until the window ends.
+    Returns (started, role, rc output)."""
+    deadline = clock() + cfg.retry_window_min * 60
+    attempt, out, role = 0, "", route.role()
+    while True:
+        attempt += 1
+        if route.kind != "code-new" and active(role):
+            out = f"{role} is already running; not touching it"
+        else:
+            if route.kind == "code-new" and (Path(cfg.code_dir) / route.target).is_dir():
+                route = Route("code", route.target, list(route.args))  # rc created folder and role on a refused try
+            cmd = route.command(cfg.rc)
+            log(f"attempt {attempt}: {' '.join(cmd)}")
+            try:
+                r = runner(cmd, input=brief, capture_output=True, text=True, timeout=600, check=False)
+                out = ((r.stdout or "") + (r.stderr or "")).strip()
+                m = re.search(r"started (\S+) with model", out)
+                if r.returncode == 0 and m and "brief not queued" not in out:
+                    return True, m.group(1), out
+                if r.returncode == 0 and "brief not queued" in out:
+                    out = "rc did not queue the brief: " + out
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                out = f"rc failed: {exc}"
+            if not RETRYABLE.search(out):
+                log(f"refused, not retryable: {out}")
+                return False, role, out
+        left = deadline - clock()
+        if left < cfg.retry_interval_min * 60:
+            log(f"giving up after {attempt} attempt(s): {out}")
+            return False, role, out
+        log(f"refused ({out.splitlines()[-1] if out else 'no output'}); next try in {cfg.retry_interval_min} min")
+        sleep(cfg.retry_interval_min * 60)
+
+
+def mcp_post(url: str, payload: dict[str, Any], session: str | None) -> tuple[dict[str, Any] | None, str | None]:
+    if not url.startswith("http://127.0.0.1:"):
+        raise RuntimeError("mail.mcp_url must be the loopback mcp-shared service")
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    if session:
+        headers["Mcp-Session-Id"] = session
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        body = resp.read().decode("utf-8", "replace").strip()
+        sid = resp.headers.get("Mcp-Session-Id")
+    if not body:
+        return None, sid
+    if body.startswith("{"):
+        return json.loads(body), sid
+    for line in reversed(body.splitlines()):
+        if line.startswith("data:"):
+            return json.loads(line[5:].strip()), sid
+    return None, sid
+
+
+def send_mail(cfg: Config, subject: str, body: str) -> None:
+    if not cfg.mail_account_id or not cfg.mail_to_email:
+        raise RuntimeError("mail is not configured ([mail] account_id, to_email)")
+    init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "aspirations", "version": VERSION}}}
+    _, sid = mcp_post(cfg.mail_url, init, None)
+    mcp_post(cfg.mail_url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
+    call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "nc_mail_send_message", "arguments": {
+        "account_id": cfg.mail_account_id, "to": json.dumps([{"label": cfg.mail_to_name, "email": cfg.mail_to_email}]),
+        "subject": subject, "body": body}}}
+    reply, _ = mcp_post(cfg.mail_url, call, sid)
+    if not reply or "error" in reply or (reply.get("result") or {}).get("isError"):
+        raise RuntimeError(f"mail not sent: {json.dumps(reply)[:300]}")
+
+
+def notify(cfg: Config, log: Log, subject: str, body: str, enabled: bool) -> bool:
+    if not enabled:
+        log(f"mail skipped (--no-mail): {subject}")
+        return True
+    try:
+        send_mail(cfg, subject, body)
+        log(f"mailed: {subject}")
+        return True
+    except Exception as exc:  # noqa: BLE001 (report every mail failure, never crash the run on it)
+        log(f"MAIL FAILED: {exc}")
+        return False
+
+
+def plan(todos: list[Todo], cfg: Config, started: set[str]) -> tuple[Todo, list[tuple[Todo, bool, str]]]:
+    parent = find_parent(todos, cfg.parent)
+    rows = [(t, *is_open(t, cfg.started_category, started)) for t in children(todos, parent.uid)]
+    return parent, rows
+
+
+def run(args: argparse.Namespace) -> int:
+    cfg = load_config(Path(args.config))
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    log = Log(None if args.dry_run else STATE / "aspirations.log")
+    lock = (STATE / "lock").open("w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("another aspirations run holds the lock", file=sys.stderr)
+        return EXIT_BUSY
+    now = datetime.now().astimezone()
+    started_file = STATE / "started.json"
+    started = load_started(started_file)
+    mail = not (args.dry_run or args.no_mail)
+    try:
+        dav = CalDAV(load_env(), cfg.calendar)
+        todos, raw = dav.todos()
+        _, rows = plan(todos, cfg, set(started))
+    except Exception as exc:  # noqa: BLE001
+        log(f"FAILED reading the task list: {exc}")
+        notify(cfg, log, "Aspirations: task list not readable", f"The weekly aspirations job could not read the task list:\n\n{exc}\n\nLog: {STATE / 'aspirations.log'}", mail)
+        return EXIT_FAIL
+    log(f"{cfg.parent}: {len(rows)} idea(s), {sum(1 for r in rows if r[1])} open")
+    for t, ok, why in rows:
+        log(f"  {'open   ' if ok else 'skipped'} prio {t.priority or '-'} created {t.created[:8] or '-'} {t.summary}{'' if ok else f' ({why})'}")
+    candidates = sorted((t for t, ok, _ in rows if ok), key=lambda t: t.rank)
+    if not candidates:
+        log("nothing to start")
+        if cfg.notify_empty:
+            notify(cfg, log, "Aspirations: no open idea", f"The weekly aspirations job found no open idea under \"{cfg.parent}\" in the task list \"{cfg.calendar}\"; nothing started.", mail)
+        return EXIT_OK
+    idea = candidates[0]
+    try:
+        route = route_for(idea, cfg)
+        brief = build_brief(idea, todos, route, cfg, now)
+    except Exception as exc:  # noqa: BLE001
+        log(f"FAILED preparing {idea.summary!r}: {exc}")
+        notify(cfg, log, f"Aspirations: {idea.summary} not started", f"The weekly aspirations job could not prepare \"{idea.summary}\":\n\n{exc}", mail)
+        return EXIT_FAIL
+    log(f"pick: {idea.summary} (uid {idea.uid}) -> {route.kind} {route.target}, role {route.role()}")
+    if args.dry_run:
+        print(f"\nwould run: {' '.join(route.command(cfg.rc))}   (brief on stdin, {len(brief)} characters)\n")
+        print(brief)
+        return EXIT_OK
+    ok, role, out = start_session(route, brief, cfg, log)
+    if not ok:
+        notify(cfg, log, f"Aspirations: {idea.summary} not started",
+               f"The weekly aspirations job could not start \"{idea.summary}\" before the retry window ended.\n\nLast rc output:\n{out}\n\nThe idea stays open, so next Sunday tries it again. Log: {STATE / 'aspirations.log'}", mail)
+        return EXIT_FAIL
+    started[idea.uid] = {"summary": idea.summary, "role": role, "started": now.isoformat(timespec="seconds")}
+    save_started(started_file, started)
+    marked = ""
+    try:
+        note = f"[aspirations {now.strftime('%Y-%m-%d %H:%M')}] started as rc role {role}"
+        dav.put(idea.href, mark_started(raw[idea.href], idea.uid, cfg.started_category, note, now), idea.etag)
+        log(f"marked {idea.uid} IN-PROCESS")
+    except Exception as exc:  # noqa: BLE001
+        marked = f"\n\nWarning: marking the task IN-PROCESS failed ({exc}); the local list {started_file} keeps the next run from picking it again."
+        log(f"MARK FAILED: {exc}")
+    label = re.search(r'open the session "([^"]+)"', out)
+    notify(cfg, log, f"Aspiration started: {idea.summary}",
+           f"This week's idea: {idea.summary} (priority {idea.priority or 'none'}).\nSession: {label.group(1) if label else role} (rc role {role}), "
+           f"open it in the Claude app. It works on its own, collects decisions for you under \"Open decisions\" in its handoff and stops "
+           f"itself when done.{marked}", mail)
+    return EXIT_OK if not marked else EXIT_FAIL
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="aspirations", description=__doc__.split("\n\n")[0])
+    p.add_argument("-n", "--dry-run", action="store_true", help="read the list and show the pick, command and brief; no rc, no task change, no mail")
+    p.add_argument("--no-mail", action="store_true", help="real run without the mail")
+    p.add_argument("--config", default=str(CONFIG))
+    p.add_argument("--version", action="version", version=VERSION)
+    try:
+        return run(p.parse_args(argv))
+    except ValueError as exc:
+        print(f"aspirations: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main())
