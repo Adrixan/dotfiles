@@ -43,10 +43,10 @@ VERSION = "1.0"
 HOME = Path.home()
 CONFIG = Path(os.environ.get("WS_SYNC_CONFIG", HOME / "sync/ai/ws-sync/config.toml"))
 LOCAL_STATE = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "ws-sync"
-GENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"}
+GENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C.UTF-8"}
 SELF = Path(__file__).resolve()
 
-EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_DRIFT, EXIT_UNREACHABLE = 0, 1, 2, 3, 4
+EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_DRIFT, EXIT_UNREACHABLE, EXIT_BUSY = 0, 1, 2, 3, 4, 5
 
 
 def short_host() -> str:
@@ -708,7 +708,7 @@ class Coordinator:
         try:
             fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            die("another ws-sync run is active on this machine", EXIT_FAIL)
+            die("another ws-sync run is active on this machine (or the other machine's run holds its lock)", EXIT_BUSY)
 
     def lock_peer(self) -> bool:
         """Hold the peer's lock for this run: a remote flock around `cat`, released when stdin closes."""
@@ -1311,9 +1311,12 @@ class Coordinator:
                 continue
             roles = h.cfg.get("ansible_roles", [])
             flags = " ".join(f"-e enable_{x}=true" for x in roles)
-            ok = self.act(h, f"ansible-playbook main.yml {flags} (minutes)",
-                          f"cd {repo} && ansible-playbook main.yml {flags} > >(awk '/PLAY RECAP/{{p=1}} "
-                          "p||/^(fatal|failed):/') 2>&1",
+            # Full log on the host; the summary shows the recap, fatal lines and, on failure, the tail.
+            log = '"${XDG_STATE_HOME:-$HOME/.local/state}/ws-sync/ansible-last.log"'
+            ok = self.act(h, f"ansible-playbook main.yml {flags} (minutes; log ~/.local/state/ws-sync/ansible-last.log)",
+                          f"cd {repo} && ansible-playbook main.yml {flags} > {log} 2>&1; rc=$?; "
+                          f"awk '/PLAY RECAP/{{p=1}} p||/^(fatal|failed|ERROR)/' {log}; "
+                          f"[ $rc = 0 ] || tail -n 15 {log}; exit $rc",
                           env=True, timeout=int(a_cfg.get("timeout_s", 5400)))
             did = True
             if ok and not self.dry:
@@ -1371,8 +1374,9 @@ class Coordinator:
             write_stamp("sync", [self.mode + ("-auto" if self.auto else ""), "unreachable", self.peer.name])
             return EXIT_UNREACHABLE
         if not self.lock_peer():
-            write_stamp("sync", [self.mode, "peer-busy", self.peer.name])
-            return EXIT_FAIL
+            if not self.auto:
+                write_stamp("sync", [self.mode, "peer-busy", self.peer.name])
+            return EXIT_BUSY
         try:
             return self._sync_body()
         finally:
@@ -1425,7 +1429,7 @@ class Coordinator:
             write_stamp("sync", ["handoff", "unreachable", self.peer.name])
             return EXIT_UNREACHABLE
         if not self.lock_peer():
-            return EXIT_FAIL
+            return EXIT_BUSY
         try:
             return self._handoff_body()
         finally:
@@ -1567,7 +1571,8 @@ def maybe_detach(args: argparse.Namespace, argv: list[str]) -> None:
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     ap = argparse.ArgumentParser(prog="ws-sync", description=__doc__.split("\n\n")[0],
-                                 epilog="Exit: 0 aligned, 1 failure, 2 usage, 3 differences left, 4 peer unreachable.")
+                                 epilog="Exit: 0 aligned, 1 failure, 2 usage, 3 differences left, 4 peer unreachable, 5 busy "
+                                        "(another run holds a lock).")
     sub = ap.add_subparsers(dest="mode")
 
     def common(p: argparse.ArgumentParser) -> None:
