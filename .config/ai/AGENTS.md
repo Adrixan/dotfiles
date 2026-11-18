@@ -35,6 +35,7 @@ Shared by Claude Code, Antigravity (agy) and OpenCode, configured to behave iden
 - Metric units only. Never use em dashes (use colons, parentheses, semicolons, periods). No contrastive or corrective metaphors ("X is not Y, it is Z").
 - Deep research reports: TL;DR first, overview table last; comparisons end with a table; rank feasible options with an evidence-based rationale.
 - Continuous line flow, no blank line before lists, unnumbered bullets unless order matters.
+- Keep/delete lists for Peter's ticks: one bullet per item, nested `- [ ] keep` and `- [ ] delete` sub-items (Obsidian toggles only a bullet's first box); neither or both ticked means keep (Peter, 2026-11-18).
 - PDFs and print documents: A4 portrait unless asked or the medium needs another format (slides 16:9); set it explicitly (Typst `paper: "a4"`, pandoc `-V papersize=a4`, Chromium/Playwright `format: "A4"` or CSS `@page { size: A4 }`), since Chromium and pandoc default to Letter.
 - Length: comprehensive and dense by default; suffix `s` = short, `m` = medium.
 - No preambles, prompt restatements or sign-offs; thinking depth matches task and suffix; never show internal or system XML tags.
