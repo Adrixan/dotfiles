@@ -1,0 +1,68 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# termux-sync: keep the phone's Termux CLI/TUI tools in line with the workstations.
+#
+# The list comes from Syncthing (~/storage/shared/sync/ai/termux/packages.txt), generated nightly on
+# schulpc by the Ansible role workstation_packages from the same package state the workstations use.
+# Shared storage is writable by other Android apps and ignores file modes, so the list is treated as
+# untrusted data: every line must be a plain package name, nothing from it is ever executed, and this
+# script itself lives in Termux's private home (yadm), never in shared storage. No secrets involved.
+#
+# Usage: termux-sync [-n|--dry-run] [--list FILE]
+#   -n  show what would be installed and which manual packages are not on the list; change nothing
+set -euo pipefail
+
+list="${HOME}/storage/shared/sync/ai/termux/packages.txt"
+dry=0
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -n|--dry-run) dry=1 ;;
+    --list) list=${2:?--list needs a file}; shift ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    *) echo "termux-sync: unknown argument $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [[ -z ${TERMUX_VERSION:-} && ${PREFIX:-} != */com.termux/* ]]; then
+  echo "termux-sync: runs in Termux only" >&2
+  exit 2
+fi
+if [[ ! -r $list ]]; then
+  echo "termux-sync: no list at $list (Syncthing folder 'sync' shared with the phone? termux-setup-storage done?)" >&2
+  exit 1
+fi
+
+want=()
+while IFS= read -r line || [[ -n $line ]]; do
+  line=${line%%#*}
+  line=${line#"${line%%[![:space:]]*}"}   # trim leading whitespace
+  line=${line%"${line##*[![:space:]]}"}   # trim trailing whitespace; inner spaces stay and fail the check
+  [[ -z $line ]] && continue
+  if [[ ! $line =~ ^[a-z0-9][a-z0-9+._-]*$ ]]; then
+    echo "termux-sync: refusing list entry '$line' (not a package name)" >&2
+    exit 1
+  fi
+  want+=("$line")
+done < "$list"
+[[ ${#want[@]} -eq 0 ]] && { echo "termux-sync: list is empty, nothing to do"; exit 0; }
+
+mapfile -t installed < <(dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n' 2>/dev/null | awk '$1 ~ /^ii/ {print $2}')
+missing=()
+for p in "${want[@]}"; do
+  printf '%s\n' "${installed[@]}" | grep -qxF -- "$p" || missing+=("$p")
+done
+
+# Manual installs that are not on the list (reported only; removal stays a person's decision).
+mapfile -t manual < <(apt-mark showmanual 2>/dev/null | sort)
+extra=()
+for p in "${manual[@]}"; do
+  printf '%s\n' "${want[@]}" | grep -qxF -- "$p" || extra+=("$p")
+done
+
+echo "termux-sync: ${#want[@]} listed, ${#missing[@]} missing${missing[*]:+: ${missing[*]}}"
+[[ ${#extra[@]} -gt 0 ]] && echo "termux-sync: manual packages not on the list (kept): ${extra[*]}"
+[[ $dry -eq 1 || ${#missing[@]} -eq 0 ]] && exit 0
+
+pkg update -y
+pkg install -y -- "${missing[@]}"
+echo "termux-sync: done"
