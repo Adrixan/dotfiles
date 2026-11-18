@@ -101,12 +101,6 @@
 {% else %}
       "fetch": {"type": "remote", "url": "http://127.0.0.1:8790/servers/fetch/mcp", "oauth": false},
 {% endif %}
-      "git": {
-        "type": "local",
-        "command": [
-          "{{ env.HOME }}/.local/bin/mcp-server-git"
-        ]
-      },
 {% if env.TERMUX_VERSION != "" %}
       "arxiv": {
         "type": "local",
@@ -142,19 +136,6 @@
 {% else %}
       "markitdown": {"type": "remote", "url": "http://127.0.0.1:8790/servers/markitdown/mcp", "oauth": false},
 {% endif %}
-      "serena": {
-        "type": "local",
-        "command": [
-          "{{ env.HOME }}/.local/bin/serena",
-          "start-mcp-server",
-          "--context",
-          "ide",
-          "--project-from-cwd",
-          "--open-web-dashboard",
-          "False"
-        ],
-        "disabled": false
-      },
 {% if env.TERMUX_VERSION != "" %}
       "nextcloud": {
         "type": "local",
@@ -173,20 +154,6 @@
       },
 {% else %}
       "nextcloud": {"type": "remote", "url": "http://127.0.0.1:8790/servers/nextcloud/mcp", "oauth": false, "disabled": false},
-{% endif %}
-{% if env.TERMUX_VERSION != "" %}
-      "docker": {
-        "type": "local",
-        "command": [
-          "{{ env.HOME }}/.local/bin/mcp-server-docker"
-        ],
-        "environment": {
-          "DOCKER_HOST": "tcp://127.0.0.1:2375"
-        },
-        "disabled": false
-      },
-{% else %}
-      "docker": {"type": "remote", "url": "http://127.0.0.1:8790/servers/docker/mcp", "oauth": false, "disabled": false},
 {% endif %}
 {% if env.TERMUX_VERSION == "" %}
       "ptsd": {"type": "remote", "url": "http://127.0.0.1:8790/servers/ptsd/mcp", "oauth": false},
@@ -218,8 +185,6 @@
         "url": "http://127.0.0.1:8787/mcp",
         "oauth": false
       },
-      "excalidraw": {"type": "remote", "url": "http://127.0.0.1:8790/servers/excalidraw/mcp", "oauth": false, "disabled": true},
-      "drawio": {"type": "remote", "url": "http://127.0.0.1:8790/servers/drawio/mcp", "oauth": false},
       "obsidian-phd": {
         "type": "remote",
         "url": "http://127.0.0.1:3939/mcp",

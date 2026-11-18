@@ -2,9 +2,7 @@
   "cleanupPeriodDays": 365,
   "permissions": {
     "deny": [
-      "mcp__plugin_workstation-mcp_excalidraw__export_to_excalidraw_url",
       "mcp__plugin_workstation-mcp_wikipedia__wikipedia_*",
-      "mcp__plugin_workstation-dev_excalidraw__export_to_excalidraw_url",
       "mcp__plugin_workstation-research_wikipedia__wikipedia_*"
     ],
     "ask": [

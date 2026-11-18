@@ -59,10 +59,6 @@
 {% else %}
     "fetch": {"serverUrl": "http://127.0.0.1:8790/servers/fetch/mcp", "disabled": false},
 {% endif %}
-    "git": {
-      "command": "{{ env.HOME }}/.local/bin/mcp-server-git",
-      "disabled": false
-    },
 {% if env.TERMUX_VERSION != "" %}
     "arxiv": {
       "command": "{{ env.HOME }}/.local/bin/arxiv-mcp-server",
@@ -94,17 +90,6 @@
 {% else %}
     "markitdown": {"serverUrl": "http://127.0.0.1:8790/servers/markitdown/mcp", "disabled": false},
 {% endif %}
-    "serena": {
-      "command": "{{ env.HOME }}/.local/bin/serena",
-      "args": [
-        "start-mcp-server",
-        "--context=antigravity",
-        "--project-from-cwd",
-        "--open-web-dashboard",
-        "False"
-      ],
-      "disabled": false
-    },
 {% if env.TERMUX_VERSION != "" %}
     "nextcloud": {
       "command": "{{ env.HOME }}/.local/bin/nextcloud-mcp-server",
@@ -119,20 +104,9 @@
         "NEXTCLOUD_PASSWORD": "{{ env.NEXTCLOUD_PASSWORD }}"
       },
       "disabled": false
-    },
-{% else %}
-    "nextcloud": {"serverUrl": "http://127.0.0.1:8790/servers/nextcloud/mcp", "disabled": false},
-{% endif %}
-{% if env.TERMUX_VERSION != "" %}
-    "docker": {
-      "command": "{{ env.HOME }}/.local/bin/mcp-server-docker",
-      "env": {
-        "DOCKER_HOST": "tcp://127.0.0.1:2375"
-      },
-      "disabled": false
     }
 {% else %}
-    "docker": {"serverUrl": "http://127.0.0.1:8790/servers/docker/mcp", "disabled": false}
+    "nextcloud": {"serverUrl": "http://127.0.0.1:8790/servers/nextcloud/mcp", "disabled": false}
 {% endif %}
 {% if env.TERMUX_VERSION == "" %}
     ,
@@ -161,8 +135,6 @@
       "serverUrl": "http://127.0.0.1:8787/mcp",
       "disabled": false
     },
-    "excalidraw": {"serverUrl": "http://127.0.0.1:8790/servers/excalidraw/mcp", "disabled": true},
-    "drawio": {"serverUrl": "http://127.0.0.1:8790/servers/drawio/mcp", "disabled": false},
     "obsidian-phd": {
       "serverUrl": "http://127.0.0.1:3939/mcp",
       "disabled": false

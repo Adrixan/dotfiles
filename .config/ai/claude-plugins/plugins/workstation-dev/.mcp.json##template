@@ -8,22 +8,9 @@
         "--isolated",
         "--output-dir", "${HOME}/.cache/playwright-mcp"
       ]
-    },
-    "git": {
-      "command": "${HOME}/.local/bin/mcp-server-git"
-    },
-    "serena": {
-      "command": "${HOME}/.local/bin/serena",
-      "args": ["start-mcp-server", "--context", "claude-code", "--project-from-cwd", "--open-web-dashboard", "False"]
-    },
-{% if env.TERMUX_VERSION != "" %}
-    "docker": {
-      "command": "${HOME}/.local/bin/mcp-server-docker",
-      "env": {
-        "DOCKER_HOST": "${MCP_DOCKER_HOST:-tcp://127.0.0.1:2375}"
-      }
     }
-{% else %}
+{% if env.TERMUX_VERSION == "" %}
+    ,
     "osv": {
       "command": "/usr/bin/osv-scanner",
       "args": ["experimental-mcp"]
@@ -35,11 +22,8 @@
         "SEMGREP_SEND_METRICS": "off"
       }
     },
-    "docker": { "type": "http", "url": "http://127.0.0.1:8790/servers/docker/mcp" },
     "lighthouse": { "type": "http", "url": "http://127.0.0.1:8790/servers/lighthouse/mcp" },
     "accessibility": { "type": "http", "url": "http://127.0.0.1:8790/servers/accessibility/mcp" },
-    "excalidraw": { "type": "http", "url": "http://127.0.0.1:8790/servers/excalidraw/mcp" },
-    "drawio": { "type": "http", "url": "http://127.0.0.1:8790/servers/drawio/mcp" },
     "oci": { "type": "http", "url": "http://127.0.0.1:8790/servers/oci/mcp" },
     "gcloud": { "type": "http", "url": "http://127.0.0.1:8790/servers/gcloud/mcp" },
     "gcloud-observability": { "type": "http", "url": "http://127.0.0.1:8790/servers/gcloud-observability/mcp" }
