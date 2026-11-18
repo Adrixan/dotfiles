@@ -57,7 +57,6 @@
   },
   "enableWorkflows": true,
   "enabledPlugins": {
-    "frontend-design@claude-plugins-official": true,
     "workstation-mcp@workstation": true,
     "workstation-dev@workstation": true,
     "workstation-research@workstation": true,

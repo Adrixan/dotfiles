@@ -11,17 +11,6 @@
     }
 {% if env.TERMUX_VERSION == "" %}
     ,
-    "osv": {
-      "command": "/usr/bin/osv-scanner",
-      "args": ["experimental-mcp"]
-    },
-    "semgrep": {
-      "command": "${HOME}/.local/bin/semgrep",
-      "args": ["mcp", "-t", "stdio"],
-      "env": {
-        "SEMGREP_SEND_METRICS": "off"
-      }
-    },
     "lighthouse": { "type": "http", "url": "http://127.0.0.1:8790/servers/lighthouse/mcp" },
     "accessibility": { "type": "http", "url": "http://127.0.0.1:8790/servers/accessibility/mcp" },
     "oci": { "type": "http", "url": "http://127.0.0.1:8790/servers/oci/mcp" },

@@ -111,36 +111,9 @@
 {% if env.TERMUX_VERSION == "" %}
     ,
     "package-versions": {"serverUrl": "http://127.0.0.1:8790/servers/package-versions/mcp", "disabled": false},
-    "osv": {
-      "command": "/usr/bin/osv-scanner",
-      "args": [
-        "experimental-mcp"
-      ],
-      "disabled": false
-    },
-    "semgrep": {
-      "command": "{{ env.HOME }}/.local/bin/semgrep",
-      "args": [
-        "mcp",
-        "-t",
-        "stdio"
-      ],
-      "env": {
-        "SEMGREP_SEND_METRICS": "off"
-      },
-      "disabled": false
-    },
     "openalex": {"serverUrl": "http://127.0.0.1:8790/servers/openalex/mcp", "disabled": false},
     "pho-research": {
       "serverUrl": "http://127.0.0.1:8787/mcp",
-      "disabled": false
-    },
-    "obsidian-phd": {
-      "serverUrl": "http://127.0.0.1:3939/mcp",
-      "disabled": false
-    },
-    "obsidian-adrixan": {
-      "serverUrl": "http://127.0.0.1:3940/mcp",
       "disabled": false
     },
     "lighthouse": {"serverUrl": "http://127.0.0.1:8790/servers/lighthouse/mcp", "disabled": true},

@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "/usr/local/bin/playwright-mcp",
+      "args": [
+        "--executable-path", "/usr/bin/chromium",
+        "--headless",
+        "--isolated",
+        "--output-dir", "${HOME}/.cache/playwright-mcp"
+      ]
+    }
+    ,
+    "lighthouse": { "type": "http", "url": "http://127.0.0.1:8790/servers/lighthouse/mcp" },
+    "accessibility": { "type": "http", "url": "http://127.0.0.1:8790/servers/accessibility/mcp" },
+    "oci": { "type": "http", "url": "http://127.0.0.1:8790/servers/oci/mcp" },
+    "gcloud": { "type": "http", "url": "http://127.0.0.1:8790/servers/gcloud/mcp" },
+    "gcloud-observability": { "type": "http", "url": "http://127.0.0.1:8790/servers/gcloud-observability/mcp" }
+  }
+}
