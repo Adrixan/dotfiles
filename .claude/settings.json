@@ -121,5 +121,8 @@
       "**Org-specific CLIs**: None configured",
       "**Routine under /home/Adrixan/Obsidian/Adrixan/Teaching/ prefix**: workspace scratch files belong in `.scratch/` per global CLAUDE.md convention; `.agents/` session-handoff state files are routine read/write locations"
     ]
+  },
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE": "1"
   }
 }
