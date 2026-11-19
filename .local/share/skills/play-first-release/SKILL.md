@@ -5,7 +5,7 @@ description: Automate the first (manual-only) Google Play Console release of a p
 
 # Play Console first release
 
-Google allows the first upload of every app only through the Play Console UI (the Publishing API works from the second release on; kit `docs/play-release-automation.md`). This skill scripts that UI. Proven on Lernspiele Kids, Lernspiele Teens and Venomous Snake (2026-11-19).
+Google allows the first upload of every app only through the Play Console UI (the Publishing API works from the second release on; kit `docs/play-release-automation.md`). This skill scripts that UI. Proven on ten apps on 2026-11-19 (In Memoriam Pascal, Buchstabenfährte, Themetrail and Taktfunke fully unattended).
 
 ## Authorisation and stops
 - Peter's go of 2026-11-19 covers: accept Play App Signing (Google-generated key, the default), fill and submit the declarations from the app's `play/DECLARATIONS.md`, set the price from the price list, release straight to production and send for review without internal testing. Ask before applying it to apps outside the current wave.
@@ -24,7 +24,8 @@ One file per app in `~/sync/ai/play-console/apps/<code>.env` (see the existing o
 
 ## Run
 `scripts/first-release.sh <spec> [step ...]` from the working directory (state and asset copies go to `.scratch/play-console/`, the app URL to `<code>.url`). Steps in order: `create content rating audience safety settings listing price countries release check submit`. Every step stops with `STOP:` on anything unexpected; fix it, then rerun from that step.
-- Apps whose questionnaire has any "Yes" answer: first `DRY=1 first-release.sh <spec> rating`, read every question against DECLARATIONS.md (follow-up questions appear after a Yes), set the extra answers with `node scripts/q.mjs set <index> <label>`, then click Save and finish the step by hand or rerun it.
+- Apps whose questionnaire has any "Yes" answer: first `DRY=1 first-release.sh <spec> rating`. A Yes opens follow-up checkboxes that `q.mjs` does not list (for alcohol: "Alcohol", then "Reference / Use / Encourages", then a "Rarely / Often" radio). Read the whole form with `node scripts/pw.mjs snap`, tick with `node scripts/pw.mjs force 'role=checkbox[name="Reference"]'`, answer the rest with `node scripts/allno.mjs`, check `node scripts/q.mjs list` against DECLARATIONS.md, then Save, Next, read the ratings, Save, and continue with the steps after `rating`. LinguaFusion (alcohol reference, rarely) came out PEGI 3. Some groups ignore every Playwright click; `scripts/nat.sh <group index> <label>` clicks the native input instead. Unlabelled follow-up checkboxes ("Violence or implied violence against humans") need `pw.mjs force '[role=tabpanel] input[type=checkbox] >> nth=<i>'`. The Knots of Alderwick (text-only historical violence referred to, realistic, no gore, alcohol reference) came out PEGI 3, USK 6, ESRB E10+.
+- If `release` stops after the upload, the bundle sits on the open, unsaved draft page: fill name and notes and Save there by hand instead of rerunning (a second upload of the same versionCode fails).
 - One app at a time. Do not click in the same app in another browser while a step runs.
 
 ## Gotchas learned (2026-11-19)
