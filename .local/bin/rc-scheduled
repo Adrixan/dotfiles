@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# rc-scheduled: scheduled jobs that start an rc session and survive reboots (Peter, 2026-11-20: scheduled jobs
+# must not depend on a live session; session crons die with their session, e.g. at topgrade's nightly reboot).
+# Each job is a persistent one-shot user timer rc-job-<job>.timer that runs `rc-scheduled run <job>`:
+#   - role not running: `rc code <project> [--model M] --brief -` (resumes the last session within about 4 h,
+#     else a new one; the brief is its first message);
+#   - role running: wait until it is out of a turn and quiet for IDLE_MIN minutes (`rc quiet --idle`), then
+#     `rc down --now` and the same start, so the resumed session gets the brief;
+#   - rc refuses (RAM guard, lease, start race): retry every RETRY_MIN until WINDOW_MIN after the start.
+# rc's guards always apply (never --force). Persistent=true runs a job missed while the machine was off at boot.
+#   rc-scheduled add <job> --at 'YYYY-MM-DD HH:MM' --code <project> [--model M] [--window MIN] [--idle MIN] < brief
+#   rc-scheduled list | run <job> | rm <job>
+# State: ~/.local/state/claude-rc/scheduled/<job>/ (job.env, brief, log, done). Units: ~/.config/systemd/user.
+# Times are Europe/Vienna. Logs: the job's log and journalctl --user -u rc-job-<job>.
+set -euo pipefail
+
+RC="${HOME}/.local/bin/rc"
+STATE="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-rc/scheduled"
+UNITS="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
+JOB_RE='^[a-z][a-z0-9-]{1,39}$'
+PROJECT_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+
+die() { echo "rc-scheduled: $*" >&2; exit 2; }
+num() { [[ "$1" =~ ^[0-9]{1,4}$ ]] || die "$2 takes whole minutes"; }
+slugify() {  # same rule as rc: role code-<slug>
+    iconv -f UTF-8 -t ASCII//TRANSLIT <<< "$1" 2>/dev/null | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-34
+}
+active() { [[ "$(systemctl --user show -p ActiveState --value "claude-remote-control@$1.service")" =~ ^(active|activating|reloading)$ ]]; }
+
+cmd_add() {
+    local job="${1:-}" at="" project="" model="" window=360 idle=15 brief dir
+    [[ "$job" =~ $JOB_RE ]] || die "job name: lowercase letters, digits and dashes"
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --at) at="${2:?}"; shift 2 ;;
+            --code) project="${2:?}"; shift 2 ;;
+            --model) model="${2:?}"; shift 2 ;;
+            --window) window="${2:?}"; num "$window" --window; shift 2 ;;
+            --idle) idle="${2:?}"; num "$idle" --idle; shift 2 ;;
+            *) die "unknown option $1" ;;
+        esac
+    done
+    [[ "$at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}$ ]] || die "--at 'YYYY-MM-DD HH:MM' (Europe/Vienna)"
+    [[ "$project" =~ $PROJECT_RE && -d "${HOME}/code/${project}" ]] || die "--code: a folder in ~/code"
+    [[ "$model" =~ ^[A-Za-z0-9.\ -]{0,40}$ ]] || die "--model: a model name or id"
+    [[ $(TZ=Europe/Vienna date -d "$at" +%s) -gt $(date +%s) ]] || die "--at lies in the past"
+    [[ -e "${UNITS}/rc-job-${job}.timer" ]] && die "job $job exists (rc-scheduled rm $job first)"
+    brief="$(cat)"
+    [[ -n "${brief//[[:space:]]/}" ]] || die "brief on stdin is empty"
+    [[ ${#brief} -le 19000 ]] || die "brief longer than 19000 characters (rc accepts 20000)"
+    dir="${STATE}/${job}"
+    mkdir -p "$dir" "$UNITS"; chmod 700 "$STATE" "$dir"
+    (umask 077
+     printf '%s\n' "$brief" > "${dir}/brief"
+     printf 'AT=%q\nPROJECT=%q\nROLE=%q\nMODEL=%q\nWINDOW_MIN=%q\nIDLE_MIN=%q\nRETRY_MIN=15\n' \
+         "$at" "$project" "code-$(slugify "$project")" "$model" "$window" "$idle" > "${dir}/job.env")
+    cat > "${UNITS}/rc-job-${job}.timer" <<EOF
+# Written by rc-scheduled (yadm ~/.local/bin/rc-scheduled); job state in ${dir}
+[Unit]
+Description=rc scheduled job ${job} (${project}, ${at} Europe/Vienna)
+
+[Timer]
+OnCalendar=${at}:00 Europe/Vienna
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+EOF
+    cat > "${UNITS}/rc-job-${job}.service" <<EOF
+# Written by rc-scheduled (yadm ~/.local/bin/rc-scheduled)
+[Unit]
+Description=rc scheduled job ${job}: start the session for ${project}
+Wants=network-online.target
+After=network-online.target mcp-shared.service
+
+[Service]
+Type=oneshot
+Environment=PATH=${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=${HOME}/.local/bin/rc-scheduled run ${job}
+TimeoutStartSec=$(( window + 30 ))min
+UMask=0077
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now "rc-job-${job}.timer" >/dev/null
+    echo "scheduled $job: $project at $at Europe/Vienna (next: $(systemctl --user show -p NextElapseUSecRealtime --value "rc-job-${job}.timer"))"
+}
+
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" | tee -a "${DIR}/log"; }
+
+cmd_run() {
+    local job="${1:-}" deadline out args
+    [[ "$job" =~ $JOB_RE && -r "${STATE}/${job}/job.env" ]] || die "no job $job"
+    DIR="${STATE}/${job}"
+    [[ -e "${DIR}/done" ]] && { echo "job $job already done: $(<"${DIR}/done")"; return 0; }
+    # shellcheck source=/dev/null
+    . "${DIR}/job.env"
+    exec 9>"${DIR}/lock"
+    flock -n 9 || die "job $job is already running"
+    deadline=$(( $(date +%s) + WINDOW_MIN * 60 ))
+    args=(code "$PROJECT")
+    [[ -n "$MODEL" ]] && args+=(--model "$MODEL")
+    log "start: $PROJECT (role $ROLE), window ${WINDOW_MIN} min"
+    while :; do
+        if active "$ROLE"; then
+            if "$RC" quiet --idle "$IDLE_MIN" "$ROLE" >/dev/null 2>&1; then
+                log "$ROLE runs but is idle for ${IDLE_MIN}+ min: restarting it so the resumed session gets the brief"
+                "$RC" down "$ROLE" --now 2>&1 | tee -a "${DIR}/log" || true
+                sleep 120  # a start right after a stop is refused for 1 to 2 min
+            else
+                log "$ROLE is busy; next check in 5 min"
+                [[ $(date +%s) -lt $deadline ]] || break
+                sleep 300; continue
+            fi
+        fi
+        out="$("$RC" "${args[@]}" --brief - < "${DIR}/brief" 2>&1)" || true
+        printf '%s\n' "$out" >> "${DIR}/log"
+        if grep -q '^started ' <<< "$out" && grep -q '^brief queued' <<< "$out"; then
+            date '+%F %T' > "${DIR}/done"
+            log "done: session started with the brief"
+            systemctl --user disable "rc-job-${job}.timer" >/dev/null 2>&1 || true
+            return 0
+        fi
+        log "not started: $(tail -n 1 <<< "$out")"
+        [[ $(date +%s) -lt $deadline ]] || break
+        sleep $(( RETRY_MIN * 60 ))
+    done
+    log "gave up after ${WINDOW_MIN} min; the job stays undone (rc-scheduled run $job retries by hand)"
+    return 1
+}
+
+cmd_list() {
+    local d job st
+    [[ -d "$STATE" ]] || return 0
+    for d in "$STATE"/*/; do
+        [[ -r "${d}job.env" ]] || continue
+        job="$(basename "$d")"
+        if [[ -e "${d}done" ]]; then st="done $(<"${d}done")"
+        else st="pending, next $(systemctl --user show -p NextElapseUSecRealtime --value "rc-job-${job}.timer" 2>/dev/null)"; fi
+        (. "${d}job.env"; printf '%-28s %-24s %s Europe/Vienna  %s\n' "$job" "$PROJECT" "$AT" "$st")
+    done
+}
+
+cmd_rm() {
+    local job="${1:-}"
+    [[ "$job" =~ $JOB_RE ]] || die "job name missing"
+    systemctl --user disable --now "rc-job-${job}.timer" >/dev/null 2>&1 || true
+    command rm -f -- "${UNITS}/rc-job-${job}.timer" "${UNITS}/rc-job-${job}.service"
+    systemctl --user daemon-reload
+    command rm -rf -- "${STATE:?}/${job}"
+    echo "removed job $job"
+}
+
+case "${1:-}" in
+    add) shift; cmd_add "$@" ;;
+    run) shift; cmd_run "$@" ;;
+    list) cmd_list ;;
+    rm) shift; cmd_rm "$@" ;;
+    *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
