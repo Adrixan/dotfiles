@@ -59,6 +59,7 @@
 #   rc menu                                 running roles, stopped roles, trips, research, projects, RAM
 #   rc restore                              starts the roles that ran before a reboot (rc up marks them)
 #   rc quiet [--wait MIN]                   exit 0 once no running role (Greeter included) is in a turn
+#   rc quiet [--wait MIN] [--idle MIN] ROLE...  the same for these roles only; --idle also needs MIN quiet minutes
 #   rc prepare-reboot                       before an unattended reboot: keeps the running roles on the
 #                                           restore list and leaves each a note for its restored session
 #   rc sync-confs                           exchanges custom role confs with the other workstation now
@@ -117,7 +118,7 @@ OPTIONAL_PLUGINS=(dev research web)  # travel retired 2026-11-04: trips run on t
 # ~/code is untrusted on its own, so each project runs in a helper folder ~/code/.rc/<project>: not a
 # git repository, so it inherits the ~/code trust; auto mode edits the project outside that folder
 SLOTS_DIR="${CODE_DIR}/.rc"
-WEB_PROJECTS="${HOME}/sync/ai/web-projects.txt"  # web projects: workstation-web plugin, weekly web-modernize run
+WEB_PROJECTS="${HOME}/sync/ai/web-projects.txt"  # web projects: workstation-web plugin; web-modernize ran once (2026-11-15)
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-rc"
 REBOOT_NOTES_DIR="${STATE_DIR}/reboot-notes"  # <dir_key of RC_DIR>: date of an unattended update reboot
 REBOOT_NOTE_MAX_MIN=1440   # a note older than a day is stale
@@ -1338,17 +1339,32 @@ running_roles() {  # running_roles [--with-greeter]: roles whose server runs on 
     return 0
 }
 
-cmd_quiet() {  # rc quiet [--wait MIN]: exit 0 once no running role is in a turn (nightly update reboot gate)
-    local wait=0 role deadline busy
-    if [[ "${1:-}" == --wait ]]; then
-        wait="${2:?--wait needs minutes}"
-        [[ "$wait" =~ ^[0-9]{1,3}$ ]] || die "--wait takes whole minutes"
-    fi
+cmd_quiet() {  # rc quiet [--wait MIN] [--idle MIN] [ROLE...]: exit 0 once no running role (or none of ROLEs) is in a turn
+    # Without roles: every running role, Greeter included (nightly update reboot gate). With roles (rc-scheduled):
+    # only those; --idle MIN also needs MIN minutes without transcript activity. A role that is not running is quiet.
+    local wait=0 idle=0 role deadline busy roles=() q
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --wait) wait="${2:?--wait needs minutes}"; shift 2 ;;
+            --idle) idle="${2:?--idle needs minutes}"; shift 2 ;;
+            -*) usage ;;
+            *) roles+=("$(resolve "$1")"); shift ;;
+        esac
+    done
+    [[ "$wait" =~ ^[0-9]{1,3}$ && "$idle" =~ ^[0-9]{1,3}$ ]] || die "--wait and --idle take whole minutes"
     deadline=$(( $(date +%s) + wait * 60 ))
     while :; do
         busy=()
         while read -r role; do
-            [[ -n "$role" ]] && in_turn "$role" && busy+=("$role")
+            [[ -n "$role" ]] || continue
+            if [[ ${#roles[@]} -gt 0 ]]; then
+                printf '%s\n' "${roles[@]}" | grep -qxF -- "$role" || continue
+            fi
+            if in_turn "$role"; then busy+=("$role"); continue; fi
+            if [[ "$idle" -gt 0 ]]; then
+                q="$(last_active_sec "$role")"
+                [[ -n "$q" && "$q" -lt $(( idle * 60 )) ]] && busy+=("$role")
+            fi
         done < <(running_roles --with-greeter)
         if [[ ${#busy[@]} -eq 0 ]]; then echo "quiet: no role is in a turn"; return 0; fi
         if [[ $(date +%s) -ge $deadline ]]; then echo "busy: ${busy[*]}"; return 1; fi
