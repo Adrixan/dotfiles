@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""nc-tasks: Peter's Nextcloud Tasks over CalDAV from the shell (lists, list, add, done, edit, delete).
+
+Peter, 2026-11-21 (via the Greeter): "Enable the greeter to do quick work like adding tasks or notes or quick web
+searches directly, instead of spawning extra sessions for everything."
+
+  nc-tasks lists [--all]                                   task lists (calendar id, name)
+  nc-tasks list [--list L] [--open] [--parent TITLE] [--json]
+  nc-tasks add TITLE [--list L] [--due YYYY-MM-DD[THH:MM]] [--priority 1-9] [--note TEXT] [--parent TITLE]
+                     [--category C]...
+  nc-tasks done TITLE-or-UID [--list L]
+  nc-tasks edit TITLE-or-UID [--list L] [--title T] [--priority 0-9] [--note TEXT | --append-note TEXT]
+                     [--due D|none]
+  nc-tasks delete UID [--list L]                           (by UID only)
+  every write command takes --dry-run (print the iCalendar it would send, change nothing)
+
+Safety:
+  - credentials (NEXTCLOUD_HOST, NEXTCLOUD_USERNAME, NEXTCLOUD_PASSWORD) come from the environment or
+    ~/.config/ai/env, which is parsed, never executed, and are never printed; HTTPS only
+  - a title must match exactly one task (case-insensitive; done/edit consider open tasks only), else exit 4
+  - edits rewrite only the properties they change on the VTODO itself (VALARMs and unknown properties stay
+    verbatim), bump SEQUENCE and LAST-MODIFIED, and PUT the full resource with If-Match on its ETag
+  - tasks under the "Aspirations" parent (read by the Sunday aspirations job) are refused unless
+    --allow-aspirations is given: that list changes only on Peter's words
+
+Exit codes: 0 ok, 1 server or config failure, 2 usage, 3 not found, 4 ambiguous, 5 refused (guard),
+6 conflict (the task changed since it was read).
+
+Shared code: the CalDAV client and the iCalendar helpers come from ~/.local/bin/aspirations (loaded as a module,
+NC_TASKS_LIB overrides the path). Config (private, Syncthing): ~/sync/ai/nc-tasks/config.toml
+(NC_TASKS_CONFIG overrides). Tests: python3 -I ~/.local/share/nc-tasks/test_nc_tasks.py
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import sys
+import tomllib
+import urllib.request
+import uuid
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from types import ModuleType
+from typing import Any, Callable, Sequence, TextIO
+from zoneinfo import ZoneInfo
+
+VERSION = "1.0"
+HOME = Path.home()
+LIB = Path(os.environ.get("NC_TASKS_LIB", HOME / ".local/bin/aspirations"))
+CONFIG = Path(os.environ.get("NC_TASKS_CONFIG", HOME / "sync/ai/nc-tasks/config.toml"))
+
+EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_NOT_FOUND, EXIT_AMBIGUOUS, EXIT_REFUSED, EXIT_CONFLICT = 0, 1, 2, 3, 4, 5, 6
+CLOSED = {"COMPLETED", "CANCELLED"}
+LIST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,100}")
+NS = {"d": "DAV:", "c": "urn:ietf:params:xml:ns:caldav"}
+
+
+def _load_lib(path: Path) -> ModuleType:
+    loader = importlib.machinery.SourceFileLoader("aspirations", str(path))
+    spec = importlib.util.spec_from_loader("aspirations", loader)
+    if spec is None:
+        raise ImportError(f"cannot load {path}")
+    mod = sys.modules.get("aspirations") or importlib.util.module_from_spec(spec)
+    if "aspirations" not in sys.modules:
+        sys.modules["aspirations"] = mod
+        loader.exec_module(mod)
+    return mod
+
+
+asp = _load_lib(LIB)
+
+
+class Fail(Exception):
+    def __init__(self, message: str, code: int = EXIT_FAIL) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# --- config -------------------------------------------------------------------------------------------------
+
+@dataclass
+class Config:
+    default_list: str = "tasks"
+    timezone: str = "Europe/Vienna"
+    guard_list: str = "tasks"
+    guard_parent: str = "Aspirations"
+
+
+def load_config(path: Path = CONFIG) -> Config:
+    raw: dict[str, Any] = tomllib.loads(path.read_text()) if path.exists() else {}
+    cfg = Config()
+    tasks, guard = raw.get("tasks", {}), raw.get("guard", {})
+    cfg.default_list = str(tasks.get("default_list", cfg.default_list))
+    cfg.timezone = str(tasks.get("timezone", cfg.timezone))
+    asp_cfg = Path(os.path.expanduser(str(guard.get("aspirations_config", asp.CONFIG))))
+    if asp_cfg.exists():  # the guard follows the aspirations job's own list and parent
+        a = tomllib.loads(asp_cfg.read_text()).get("tasks", {})
+        cfg.guard_list, cfg.guard_parent = str(a.get("calendar", cfg.guard_list)), str(a.get("parent", cfg.guard_parent))
+    if not LIST_ID.fullmatch(cfg.default_list):
+        raise Fail(f"config: invalid default_list {cfg.default_list!r}")
+    ZoneInfo(cfg.timezone)
+    return cfg
+
+
+# --- CalDAV ---------------------------------------------------------------------------------------------------
+
+@dataclass
+class Calendar:
+    id: str
+    name: str
+    components: list[str]
+    calendar: bool  # a real calendar collection (False: subscription, shared or system collection)
+
+
+class Client(asp.CalDAV):  # type: ignore[misc,name-defined]
+    def __init__(self, env: dict[str, str], calendar: str, opener: Callable[..., Any] = urllib.request.urlopen) -> None:
+        if not LIST_ID.fullmatch(calendar):
+            raise Fail(f"invalid list id {calendar!r} (see nc-tasks lists)", EXIT_USAGE)
+        super().__init__(env, calendar, opener)
+        self.home: str = self.base[: -len(calendar) - 1]
+        self.path: str = self.base[len(self.host):]
+
+    def calendars(self) -> list[Calendar]:
+        body = (b'<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+                b'<d:prop><d:displayname/><d:resourcetype/><c:supported-calendar-component-set/></d:prop></d:propfind>')
+        status, _, text = self._req("PROPFIND", self.home, body, {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
+        if status != 207:
+            raise Fail(f"CalDAV PROPFIND returned HTTP {status}")
+        out = []
+        for resp in ET.fromstring(text).findall("d:response", NS):  # noqa: S314 (own server over https)
+            href = (resp.findtext("d:href", "", NS) or "").rstrip("/")
+            comps = [str(c.get("name")) for c in resp.findall(".//c:comp", NS)]
+            if not comps:
+                continue
+            out.append(Calendar(href.rsplit("/", 1)[-1], resp.findtext(".//d:displayname", "", NS) or "", comps,
+                                resp.find(".//d:resourcetype/c:calendar", NS) is not None))
+        return out
+
+    def _url(self, href: str) -> str:
+        url = self.host + href if href.startswith("/") else href
+        if not url.startswith(self.base) or "/../" in url:
+            raise Fail(f"refusing to write outside the list: {href}")
+        return url
+
+    def _write(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> None:
+        status, _, text = self._req(method, url, body, headers)
+        if status == 412:
+            raise Fail("the task changed on the server since it was read (ETag mismatch); run the command again", EXIT_CONFLICT)
+        if status not in (200, 201, 204):
+            raise Fail(f"CalDAV {method} returned HTTP {status}: {re.sub(r'\s+', ' ', text)[:200]}")
+
+    def create(self, uid: str, ics: str) -> None:
+        self._write("PUT", self.base + uid + ".ics", ics.encode(), {"Content-Type": "text/calendar; charset=utf-8", "If-None-Match": "*"})
+
+    def update(self, href: str, ics: str, etag: str) -> None:
+        self._write("PUT", self._url(href), ics.encode(), {"Content-Type": "text/calendar; charset=utf-8", "If-Match": etag})
+
+    def remove(self, href: str, etag: str) -> None:
+        self._write("DELETE", self._url(href), None, {"If-Match": etag})
+
+
+# --- tasks ----------------------------------------------------------------------------------------------------
+
+@dataclass
+class Task:
+    uid: str
+    href: str
+    etag: str
+    summary: str
+    description: str
+    status: str
+    priority: int
+    percent: int
+    completed: bool
+    parent: str
+    categories: list[str]
+    due: str = ""
+    count: int = 1          # VTODOs in the same resource (recurrence overrides); edits need exactly one
+    children: list[Task] = field(default_factory=list)
+
+    @property
+    def open(self) -> bool:
+        return not self.completed and self.status not in CLOSED
+
+
+def vtodo_props(ics: str) -> dict[str, tuple[dict[str, str], str]]:
+    """Properties on the (first) VTODO itself, not inside nested components such as VALARM."""
+    props: dict[str, tuple[dict[str, str], str]] = {}
+    stack: list[str] = []
+    for line in asp.unfold(ics):
+        if line.startswith("BEGIN:"):
+            stack.append(line[6:].upper())
+        elif line.startswith("END:"):
+            if stack and stack.pop() == "VTODO":
+                break
+        elif stack and stack[-1] == "VTODO" and line:
+            name, params, value = asp.split_prop(line)
+            props.setdefault(name, (params, value))
+    return props
+
+
+def show_due(params: dict[str, str], value: str, tz: ZoneInfo) -> str:
+    value = value.strip()
+    if params.get("VALUE", "").upper() == "DATE" or re.fullmatch(r"\d{8}", value):
+        return f"{value[:4]}-{value[4:6]}-{value[6:8]}"
+    m = re.fullmatch(r"(\d{8})T(\d{4})(\d{2})(Z?)", value)
+    if not m:
+        return value
+    dt = datetime.strptime(m.group(1) + m.group(2) + m.group(3), "%Y%m%d%H%M%S")
+    if m.group(4):
+        dt = dt.replace(tzinfo=timezone.utc).astimezone(tz)
+    return dt.strftime("%Y-%m-%dT%H:%M")
+
+
+def load_tasks(todos: list[Any], raw: dict[str, str], tz: ZoneInfo) -> list[Task]:
+    out = []
+    for t in todos:
+        data = raw.get(t.href, "")
+        props = vtodo_props(data)
+        due = show_due(*props["DUE"], tz) if "DUE" in props else ""
+        out.append(Task(t.uid, t.href, t.etag, t.summary, t.description, t.status, t.priority, t.percent, t.completed,
+                        t.parent, list(t.categories), due, len(asp.parse_todos(data))))
+    by_uid = {t.uid: t for t in out}
+    for t in out:
+        if t.parent in by_uid and t.parent != t.uid:
+            by_uid[t.parent].children.append(t)
+    return out
+
+
+def ancestors(task: Task, by_uid: dict[str, Task]) -> list[Task]:
+    chain, seen, cur = [], {task.uid}, task
+    while cur.parent in by_uid and cur.parent not in seen:
+        cur = by_uid[cur.parent]
+        seen.add(cur.uid)
+        chain.append(cur)
+    return chain
+
+
+def resolve(tasks: list[Task], ref: str, *, open_only: bool, by_uid_only: bool = False) -> Task:
+    hits = [t for t in tasks if t.uid == ref]
+    if not hits and not by_uid_only:
+        hits = [t for t in tasks if t.summary.casefold() == ref.strip().casefold() and (t.open or not open_only)]
+    if not hits:
+        what = "UID" if by_uid_only else ("open task" if open_only else "task")
+        raise Fail(f"no {what} matches {ref!r} in this list (nc-tasks list shows titles and UIDs)", EXIT_NOT_FOUND)
+    if len({t.uid for t in hits}) > 1:
+        lines = "\n".join(f"  {t.uid}  {t.summary}{'' if t.open else ' (done)'}" for t in hits)
+        raise Fail(f"{ref!r} matches {len(hits)} tasks; use the UID:\n{lines}", EXIT_AMBIGUOUS)
+    return hits[0]
+
+
+def guard(cfg: Config, list_id: str, task: Task | None, by_uid: dict[str, Task], allow: bool) -> None:
+    if list_id != cfg.guard_list or task is None or allow:
+        return
+    if any(t.summary.casefold() == cfg.guard_parent.casefold() for t in [task, *ancestors(task, by_uid)]):
+        raise Fail(f"refused: {task.summary!r} is in the {cfg.guard_parent!r} list that the Sunday aspirations job reads; "
+                   "it changes only on Peter's words (then add --allow-aspirations)", EXIT_REFUSED)
+
+
+# --- iCalendar writing ----------------------------------------------------------------------------------------
+
+def text(value: str) -> str:
+    return asp.escape(value.replace("\r\n", "\n").replace("\r", "\n"))  # type: ignore[no-any-return]
+
+
+def stamp(now: datetime) -> str:
+    return now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def due_line(value: str, tz: ZoneInfo) -> tuple[str, bool]:
+    """'YYYY-MM-DD' -> DUE;VALUE=DATE, 'YYYY-MM-DDTHH:MM' (local time) -> DUE in UTC; returns (line, is_date)."""
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            return f"DUE;VALUE=DATE:{datetime.strptime(value, '%Y-%m-%d').strftime('%Y%m%d')}", True
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}", value):
+            dt = datetime.strptime(value.replace(" ", "T"), "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
+            return f"DUE:{stamp(dt)}", False
+    except ValueError:
+        pass
+    raise Fail(f"--due wants YYYY-MM-DD or YYYY-MM-DDTHH:MM, got {value!r}", EXIT_USAGE)
+
+
+def new_vtodo(uid: str, title: str, now: datetime, *, priority: int = 0, note: str = "", due: str = "",
+              parent: str = "", categories: Sequence[str] = ()) -> str:
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", f"PRODID:-//nc-tasks {VERSION}//EN", "BEGIN:VTODO", f"UID:{uid}",
+             f"DTSTAMP:{stamp(now)}", f"CREATED:{stamp(now)}", f"LAST-MODIFIED:{stamp(now)}", "SUMMARY:" + text(title),
+             "STATUS:NEEDS-ACTION"]
+    if priority:
+        lines.append(f"PRIORITY:{priority}")
+    if note:
+        lines.append("DESCRIPTION:" + text(note))
+    if due:
+        lines.append(due)
+    if categories:
+        lines.append("CATEGORIES:" + ",".join(text(c) for c in categories))
+    if parent:
+        lines.append(f"RELATED-TO;RELTYPE=PARENT:{parent}")
+    lines += ["END:VTODO", "END:VCALENDAR"]
+    return "\r\n".join(asp.fold(line) for line in lines) + "\r\n"
+
+
+def rewrite(ics: str, changes: dict[str, str | None], now: datetime) -> str:
+    """Replace (str: the full new content line) or drop (None) properties of the VTODO itself; keep everything else."""
+    lines = [line for line in asp.unfold(ics) if line]
+    drop = {k.upper() for k in changes} | {"LAST-MODIFIED", "DTSTAMP", "SEQUENCE"}
+    out: list[str] = []
+    stack: list[str] = []
+    seq = 0
+    for line in lines:
+        if line.startswith("BEGIN:"):
+            stack.append(line[6:].upper())
+        elif line.startswith("END:") and stack:
+            if stack[-1] == "VTODO":
+                out += [v for v in changes.values() if v] + [f"LAST-MODIFIED:{stamp(now)}", f"DTSTAMP:{stamp(now)}", f"SEQUENCE:{seq + 1}"]
+            stack.pop()
+        elif stack and stack[-1] == "VTODO":
+            name, _, value = asp.split_prop(line)
+            if name == "SEQUENCE":
+                seq = int(value) if value.strip().isdigit() else 0
+            if name in drop:
+                continue
+        out.append(line)
+    return "\r\n".join(asp.fold(line) for line in out) + "\r\n"
+
+
+# --- commands -------------------------------------------------------------------------------------------------
+
+@dataclass
+class Ctx:
+    cfg: Config
+    env: dict[str, str]
+    out: TextIO
+    opener: Callable[..., Any]
+    now: datetime
+
+    def client(self, list_id: str | None) -> tuple[Client, str]:
+        lid = list_id or self.cfg.default_list
+        return Client(self.env, lid, self.opener), lid
+
+
+def fmt(t: Task, depth: int) -> str:
+    box = "[ ]" if t.open else ("[-]" if t.status == "CANCELLED" else "[x]")
+    prio = f"P{t.priority}" if t.priority else "  "
+    extra = f"  #{','.join(t.categories)}" if t.categories else ""
+    return f"{'  ' * depth}{box} {prio} {t.due or '-':16} {t.summary}{extra}  <{t.uid}>"
+
+
+def as_json(t: Task, open_only: bool, seen: set[str]) -> dict[str, Any]:
+    seen.add(t.uid)
+    kids = [c for c in sorted(t.children, key=sort_key) if c.uid not in seen and (c.open or not open_only)]
+    return {"uid": t.uid, "title": t.summary, "status": t.status or "NEEDS-ACTION", "open": t.open, "priority": t.priority,
+            "due": t.due, "categories": t.categories, "parent": t.parent, "note": t.description,
+            "children": [as_json(c, open_only, seen) for c in kids]}
+
+
+def sort_key(t: Task) -> tuple[bool, int, str, str]:
+    return (not t.open, t.priority if 1 <= t.priority <= 9 else 10, t.due or "9999", t.summary.casefold())
+
+
+def cmd_lists(ctx: Ctx, a: argparse.Namespace) -> int:
+    client, _ = ctx.client(None)
+    cals = [c for c in client.calendars() if "VTODO" in c.components and (a.all or c.calendar)]
+    for c in sorted(cals, key=lambda c: c.id):
+        mark = " (default)" if c.id == ctx.cfg.default_list else ""
+        ctx.out.write(f"{c.id}\t{c.name}{mark}{'' if c.calendar else ' [not a plain calendar: subscription or shared]'}\n")
+    return EXIT_OK
+
+
+def cmd_list(ctx: Ctx, a: argparse.Namespace) -> int:
+    client, _ = ctx.client(a.list)
+    todos, raw = client.todos()
+    tasks = load_tasks(todos, raw, ZoneInfo(ctx.cfg.timezone))
+    by_uid = {t.uid: t for t in tasks}
+    roots = [resolve(tasks, a.parent, open_only=False)] if a.parent else \
+        [t for t in tasks if t.parent not in by_uid or t.parent == t.uid]
+    roots = sorted((r for r in roots if r.open or not a.open), key=sort_key)
+    if a.json:
+        seen: set[str] = set()
+        json.dump([as_json(r, a.open, seen) for r in roots], ctx.out, ensure_ascii=False, indent=1)
+        ctx.out.write("\n")
+        return EXIT_OK
+
+    def walk(t: Task, depth: int, seen: set[str]) -> None:
+        seen.add(t.uid)
+        ctx.out.write(fmt(t, depth) + "\n")
+        for c in sorted(t.children, key=sort_key):
+            if c.uid not in seen and (c.open or not a.open):
+                walk(c, depth + 1, seen)
+
+    for r in roots:
+        walk(r, 0, set())
+    return EXIT_OK
+
+
+def cmd_add(ctx: Ctx, a: argparse.Namespace) -> int:
+    title = a.title.strip()
+    if not title:
+        raise Fail("the title is empty", EXIT_USAGE)
+    tz = ZoneInfo(ctx.cfg.timezone)
+    client, lid = ctx.client(a.list)
+    parent_uid = ""
+    if a.parent:
+        todos, raw = client.todos()
+        tasks = load_tasks(todos, raw, tz)
+        parent = resolve(tasks, a.parent, open_only=True)
+        guard(ctx.cfg, lid, parent, {t.uid: t for t in tasks}, a.allow_aspirations)
+        parent_uid = parent.uid
+    due = due_line(a.due, tz)[0] if a.due else ""
+    uid = str(uuid.uuid4())
+    ics = new_vtodo(uid, title, ctx.now, priority=a.priority or 0, note=a.note or "", due=due, parent=parent_uid,
+                    categories=[c.strip() for c in a.category if c.strip()])
+    if a.dry_run:
+        ctx.out.write(f"dry run: would add to {lid}:\n{ics}")
+        return EXIT_OK
+    client.create(uid, ics)
+    ctx.out.write(f"added {uid} to {lid}: {title}\n")
+    return EXIT_OK
+
+
+def _target(ctx: Ctx, a: argparse.Namespace, *, open_only: bool, by_uid_only: bool = False) -> tuple[Client, str, Task, str]:
+    client, lid = ctx.client(a.list)
+    todos, raw = client.todos()
+    tasks = load_tasks(todos, raw, ZoneInfo(ctx.cfg.timezone))
+    task = resolve(tasks, a.ref, open_only=open_only, by_uid_only=by_uid_only)
+    guard(ctx.cfg, lid, task, {t.uid: t for t in tasks}, a.allow_aspirations)
+    if task.count != 1:
+        raise Fail(f"{task.summary!r} is a recurring task with {task.count} instances; change it in the Tasks app")
+    return client, lid, task, raw[task.href]
+
+
+def _apply(ctx: Ctx, a: argparse.Namespace, client: Client, lid: str, task: Task, ics: str, verb: str) -> int:
+    if a.dry_run:
+        ctx.out.write(f"dry run: would {verb} in {lid}: {task.summary} <{task.uid}>\n{ics}")
+        return EXIT_OK
+    client.update(task.href, ics, task.etag)
+    ctx.out.write(f"{verb}: {task.summary} <{task.uid}>\n")
+    return EXIT_OK
+
+
+def cmd_done(ctx: Ctx, a: argparse.Namespace) -> int:
+    client, lid, task, data = _target(ctx, a, open_only=True)
+    if not task.open:
+        raise Fail(f"{task.summary!r} is already {task.status.lower() or 'completed'}", EXIT_OK)
+    ics = rewrite(data, {"STATUS": "STATUS:COMPLETED", "COMPLETED": f"COMPLETED:{stamp(ctx.now)}",
+                         "PERCENT-COMPLETE": "PERCENT-COMPLETE:100"}, ctx.now)
+    return _apply(ctx, a, client, lid, task, ics, "done")
+
+
+def cmd_edit(ctx: Ctx, a: argparse.Namespace) -> int:
+    if a.title is None and a.priority is None and a.note is None and a.append_note is None and a.due is None:
+        raise Fail("nothing to change: give --title, --priority, --note, --append-note or --due", EXIT_USAGE)
+    client, lid, task, data = _target(ctx, a, open_only=False)
+    tz = ZoneInfo(ctx.cfg.timezone)
+    changes: dict[str, str | None] = {}
+    if a.title is not None:
+        if not a.title.strip():
+            raise Fail("the title is empty", EXIT_USAGE)
+        changes["SUMMARY"] = "SUMMARY:" + text(a.title.strip())
+    if a.priority is not None:
+        changes["PRIORITY"] = f"PRIORITY:{a.priority}" if a.priority else None
+    if a.note is not None:
+        changes["DESCRIPTION"] = "DESCRIPTION:" + text(a.note) if a.note else None
+    elif a.append_note is not None:
+        joined = (task.description.rstrip("\n") + "\n" if task.description.strip() else "") + a.append_note
+        changes["DESCRIPTION"] = "DESCRIPTION:" + text(joined)
+    if a.due is not None:
+        if a.due.lower() == "none":
+            changes["DUE"] = None
+        else:
+            line, is_date = due_line(a.due, tz)
+            start = vtodo_props(data).get("DTSTART")
+            if start is not None:
+                start_is_date = start[0].get("VALUE", "").upper() == "DATE" or bool(re.fullmatch(r"\d{8}", start[1].strip()))
+                if start_is_date != is_date:
+                    raise Fail(f"the task's start is a {'date' if start_is_date else 'date-time'}; give the due as one too "
+                               "(RFC 5545 wants both of the same kind)", EXIT_USAGE)
+            changes["DUE"] = line
+    return _apply(ctx, a, client, lid, task, rewrite(data, changes, ctx.now), "edited")
+
+
+def cmd_delete(ctx: Ctx, a: argparse.Namespace) -> int:
+    client, lid, task, _ = _target(ctx, a, open_only=False, by_uid_only=True)
+    if task.children:
+        raise Fail(f"{task.summary!r} has {len(task.children)} subtask(s); delete or move them first", EXIT_REFUSED)
+    if a.dry_run:
+        ctx.out.write(f"dry run: would delete from {lid}: {task.summary} <{task.uid}>\n")
+        return EXIT_OK
+    client.remove(task.href, task.etag)
+    ctx.out.write(f"deleted: {task.summary} <{task.uid}>\n")
+    return EXIT_OK
+
+
+# --- CLI ------------------------------------------------------------------------------------------------------
+
+def priority(value: str) -> int:
+    if not value.isdigit() or not 0 <= int(value) <= 9:
+        raise argparse.ArgumentTypeError("priority is 1 (highest) to 9 (lowest), 0 removes it")
+    return int(value)
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="nc-tasks", description=(__doc__ or "").split("\n\n")[0],
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=VERSION)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--list", help="list id (nc-tasks lists); default from the config")
+    write = argparse.ArgumentParser(add_help=False)
+    write.add_argument("--dry-run", "-n", action="store_true", help="print what would be sent, change nothing")
+    write.add_argument("--allow-aspirations", action="store_true", help="allow changes under the Aspirations task (Peter's words only)")
+
+    s = sub.add_parser("lists", help="task lists (calendars with VTODO)")
+    s.add_argument("--all", action="store_true", help="also subscriptions and shared collections")
+    s.set_defaults(fn=cmd_lists)
+    s = sub.add_parser("list", parents=[common], help="tasks as a tree")
+    s.add_argument("--open", action="store_true", help="only open tasks")
+    s.add_argument("--parent", help="only this task (exact title or UID) and its subtasks")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_list)
+    s = sub.add_parser("add", parents=[common, write], help="add a task")
+    s.add_argument("title")
+    s.add_argument("--due", help="YYYY-MM-DD or YYYY-MM-DDTHH:MM (local time)")
+    s.add_argument("--priority", type=priority, help="1 (highest) to 9 (lowest)")
+    s.add_argument("--note")
+    s.add_argument("--parent", help="parent task (exact title or UID, open)")
+    s.add_argument("--category", action="append", default=[], help="repeatable")
+    s.set_defaults(fn=cmd_add)
+    s = sub.add_parser("done", parents=[common, write], help="mark a task completed")
+    s.add_argument("ref", metavar="TITLE-or-UID")
+    s.set_defaults(fn=cmd_done)
+    s = sub.add_parser("edit", parents=[common, write], help="change title, priority, note or due")
+    s.add_argument("ref", metavar="TITLE-or-UID")
+    s.add_argument("--title")
+    s.add_argument("--priority", type=priority)
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--note", help="replace the note ('' removes it)")
+    g.add_argument("--append-note", help="add a line to the note")
+    s.add_argument("--due", help="YYYY-MM-DD, YYYY-MM-DDTHH:MM or none")
+    s.set_defaults(fn=cmd_edit)
+    s = sub.add_parser("delete", parents=[common, write], help="delete a task by UID")
+    s.add_argument("ref", metavar="UID")
+    s.set_defaults(fn=cmd_delete)
+    return p
+
+
+def main(argv: Sequence[str] | None = None, *, out: TextIO = sys.stdout, err: TextIO = sys.stderr,
+         opener: Callable[..., Any] = urllib.request.urlopen, env: dict[str, str] | None = None,
+         cfg: Config | None = None, now: datetime | None = None) -> int:
+    try:
+        a = parser().parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0) and EXIT_USAGE
+    try:
+        ctx = Ctx(cfg or load_config(), env or asp.load_env(), out, opener, now or datetime.now(timezone.utc))
+        fn: Callable[[Ctx, argparse.Namespace], int] = a.fn
+        return fn(ctx, a)
+    except Fail as exc:
+        err.write(f"nc-tasks: {exc}\n")
+        return exc.code
+    except (RuntimeError, ValueError, OSError, ET.ParseError, tomllib.TOMLDecodeError) as exc:
+        secret = (env or {}).get("NEXTCLOUD_PASSWORD") or os.environ.get("NEXTCLOUD_PASSWORD") or "\0"
+        err.write(f"nc-tasks: error: {str(exc).replace(secret, '***')}\n")
+        return EXIT_FAIL
+
+
+if __name__ == "__main__":
+    sys.exit(main())
