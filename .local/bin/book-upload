@@ -66,8 +66,9 @@ setup() {
     ssh-keygen -q -t ed25519 -N '' -C "book-upload $device" -f "$key" || return 2
     say "created $key (upload-only key, no passphrase)"
   fi
-  say "public key, to be added on the server once:"
+  say "public key, to be added on the server once (compare the fingerprint when it is added):"
   cat "$key.pub"
+  ssh-keygen -lf "$key.pub"
 }
 
 # shellcheck disable=SC2329 # called by the EXIT trap
