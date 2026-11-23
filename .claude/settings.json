@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME/.local/bin/rc\" hook reboot-note",
+            "command": "\"$HOME/.local/bin/rc\" hook session-start",
             "timeout": 15
           }
         ]

@@ -68,10 +68,13 @@
 #                                           holder to hand over and resumes its roles here; force takes it
 #                                           without asking (the other may still write: conflict copies follow)
 #                                           (every rc command does it first; ~/sync/ai/claude-rc)
-#   rc hook code-session|greeter-start|greeter-slash|research-session|turn-done
-#                                           SessionStart hooks of ~/code, the Greeter and research topics;
-#                                           the Greeter's UserPromptExpansion hook; Stop hook (global)
+#   rc hook session-start|code-session|research-session|trip-session|project-session|greeter-start|greeter-slash|turn-done
+#                                           SessionStart hooks: global (start summary, reboot note), ~/code,
+#                                           research topics, trips, vault projects and the Greeter; every one
+#                                           but the Greeter's asks a session with an earlier state for a start
+#                                           summary; the Greeter's UserPromptExpansion hook; Stop hook (global)
 #                                           that asks for a push after long turns
+#   rc summary-seed                         records the live sessions as seen (once per host, at rollout)
 # <role> is the role name or its label (case-insensitive).
 # ==============================================================================
 
@@ -155,6 +158,16 @@ RESEARCH_REMOTE="${STATE_DIR}/research-remote"  # cse_<id> of sessions that alre
 BRIEFS_DIR="${STATE_DIR}/briefs"  # <role>: pending brief
 BRIEF_MAX=20000
 BRIEF=""; BRIEF_SET=no; UP_ARGS=()
+# Start summary (Peter, 2026-11-23: "any session I start, no matter the type, provides a brief summary, if it has
+# existed before"): every rc start hook (session-start globally, code-, research-, trip- and project-session in
+# their folders) asks a session with an earlier state to open with at most SUMMARY_LINES lines from the role's
+# state files (summary_sources), else from its newest earlier transcript. Only files are read here; the session
+# writes the summary itself. Due for a new session, and once for a reattached one after `rc up` (not after
+# rc restart, rc restore or a reboot). The Greeter and the Travel Greeter keep their own start.
+SUMMARY_SEEN="${STATE_DIR}/summary-seen"  # <cse_id>: epoch of the session's first start or its last summary
+SUMMARY_DUE="${STATE_DIR}/summary-due"    # <role>: epoch of the last rc up; a reattached session summarises once after it
+SUMMARY_DUE_MIN=20                        # that rc up counts this long (a start may wait for the unit's retry)
+SUMMARY_LINES=5
 HANDOFF_RULE="Expert sessions: work that belongs to another role (code or tool development, a deep research, a trip, a vault project, educator) goes to that role's session, not here: start it with rc (rc code <project> or rc code --new <name>, rc research, rc trip, rc project, rc up educator), pass the full context with --brief - (stdin) or, for a running session, with SendMessage (ListAgents lists sessions on the other machines too), and tell Peter the label; see the skill rc-roles."
 RC_BIN="$(realpath -- "$0")"
 LEASE_BIN=/usr/local/libexec/workstation-lease  # Ansible ai_workstation lease.yml
@@ -608,6 +621,7 @@ cmd_up() {
     set_model "$role" "$model"
     systemctl --user start "$(unit "$role")"
     want "$role"
+    mark_summary_due "$role"
     if [[ -n "$ttl" ]]; then
         systemctl --user stop "rc-ttl-${role}.timer" 2>/dev/null || true
         # rc down, so the expired role is not brought back after a reboot
@@ -910,7 +924,110 @@ queue_brief() {  # queue_brief <role>: BRIEF for the role's next session, taken 
     fi
     mkdir -p "$BRIEFS_DIR"; chmod 700 "$BRIEFS_DIR"
     (umask 077; printf '%s\n' "$BRIEF" > "${BRIEFS_DIR}/$1.tmp") && mv -- "${BRIEFS_DIR}/$1.tmp" "${BRIEFS_DIR}/$1"
+    # A scheduled job (a systemd service outside any role: aspirations, repo security scan) or RC_BRIEF_ORIGIN=job:
+    # its brief wins, the start summary shrinks to one context line
+    if [[ "${RC_BRIEF_ORIGIN:-}" == job || ( -n "${INVOCATION_ID:-}" && -z "${RC_DIR:-}" && "${RC_BRIEF_ORIGIN:-}" != peter ) ]]; then
+        : > "${BRIEFS_DIR}/$1.job"
+    else
+        rm -f -- "${BRIEFS_DIR}/$1.job"
+    fi
     echo "brief queued: the new session gets it as its first message"
+}
+
+brief_from_job() {  # brief_from_job <role>: the pending brief came from a scheduled job (removes the mark)
+    local f="${BRIEFS_DIR}/$1.job"
+    [[ "$1" =~ ^[a-z][a-z0-9-]{1,39}$ && -f "$f" ]] || return 1
+    rm -f -- "$f"
+}
+
+mark_summary_due() {  # mark_summary_due <role>: Peter started the role, so reattached sessions summarise once
+    [[ "${RC_SUMMARY_MARK:-yes}" == no ]] && return 0
+    mkdir -p "$SUMMARY_DUE"
+    date +%s > "${SUMMARY_DUE}/$1"
+}
+
+summary_due() {  # summary_due <role> <cse_id> <source>: this session opens with a summary (and records that)
+    local role="$1" rid="$2" src="$3" f seen due now
+    [[ "$rid" =~ ^cse_[A-Za-z0-9]+$ && "$src" != compact ]] || return 1  # rc sessions only, never after a compaction
+    claude_print_only && return 1  # a `claude -p` probe run from inside a role session
+    mkdir -p "$SUMMARY_SEEN"
+    find "$SUMMARY_SEEN" -maxdepth 1 -type f -mtime +30 -delete 2>/dev/null || true
+    f="${SUMMARY_SEEN}/${rid}"; now="$(date +%s)"
+    if [[ ! -f "$f" ]]; then echo "$now" > "$f"; return 0; fi  # a new session
+    seen="$(epoch_file "$f")"; due="$(epoch_file "${SUMMARY_DUE}/${role}")"
+    # a reattached session: only once after Peter's rc up, not after rc restart, rc restore or a reboot
+    [[ "$due" -gt "$seen" && $(( now - due )) -le $(( SUMMARY_DUE_MIN * 60 )) ]] || return 1
+    echo "$now" > "$f"
+}
+
+cmd_summary_seed() {  # rc summary-seed: record the live sessions as seen (once per host when rolling out the summary)
+    local role sid n=0
+    mkdir -p "$SUMMARY_SEEN"
+    while read -r role; do
+        [[ -n "$role" ]] || continue
+        while read -r sid; do
+            [[ "$sid" =~ ^cse_[A-Za-z0-9]+$ && ! -f "${SUMMARY_SEEN}/${sid}" ]] || continue
+            date +%s > "${SUMMARY_SEEN}/${sid}"; n=$((n + 1))
+        done < <(live_sessions "$role")
+    done < <(running_roles --with-greeter)
+    echo "recorded ${n} live session(s) as seen"
+}
+
+summary_sources() {  # summary_sources <folder|file>...: the state files a start summary is built from
+    local d f sub found
+    for d in "$@"; do
+        [[ -n "$d" ]] || continue
+        if [[ -f "$d" ]]; then [[ -s "$d" ]] && echo "$d"; continue; fi
+        [[ -d "$d" ]] || continue
+        found=no
+        for f in "$d/.agents/session-handoff.md" "$d/.agents/project-state.md" "$d/.agents/plan.md" "$d/.agents/to-do.md" "$d/trip.md"; do
+            [[ -s "$f" ]] && { echo "$f"; found=yes; }
+        done
+        [[ "$found" == yes ]] && continue
+        for sub in Memory Chats; do  # no handoff: a vault project's (claude.ai layout) newest note of each
+            [[ -d "$d/$sub" ]] || continue
+            f="$(find "$d/$sub" -type f -name '*.md' -size +0 -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+            [[ -n "$f" ]] && echo "$f"
+        done
+    done
+    return 0
+}
+
+last_transcript() {  # last_transcript <RC_DIR> <current transcript>: the folder's newest earlier transcript, or empty
+    find "${PROJECTS_DIR}/$(dir_key "$1")" -maxdepth 1 -name '*.jsonl' -size +2k -printf '%T@ %p\n' 2>/dev/null \
+        | sort -rn | cut -d' ' -f2- | grep -vxF -- "${2:-/nonexistent}" | head -1 || true
+}
+
+summary_request() {  # summary_request <brief|job|start> <RC_DIR> <transcript> <source...>: the instruction, or empty
+    local mode="$1" dir="$2" cur="$3" what t
+    shift 3
+    what="$(summary_sources "$@" | sed "s|^${HOME}/|~/|" | paste -sd ';' | sed 's/;/; /g')"
+    if [[ -z "$what" ]]; then
+        t="$(last_transcript "$dir" "$cur")"
+        [[ -n "$t" ]] || return 0  # a fresh role: nothing to summarise
+        what="the previous session's transcript ${t/#$HOME/\~} (JSON lines; read only its end, e.g. tail -n 300 of it piped to jq -r 'select(.type==\"user\" or .type==\"assistant\") | .message.content | if type==\"string\" then . else (map(.text? // empty) | join(\" \")) end' | tail -c 8000)"
+    fi
+    case "$mode" in
+        job) printf '%s' "Earlier state of this role: ${what}. This start came from a scheduled job, so its brief wins: add at most one line on the previous state to your first reply." ;;
+        brief) printf '%s' "Then add a summary of the previous state of at most ${SUMMARY_LINES} lines (what was done last, what is open, what needs Peter, the next step), read from: ${what}." ;;
+        *) printf '%s' "[session-summary] This role has worked here before. Read ${what} (in a long log only the newest entries). Open with a summary of at most ${SUMMARY_LINES} lines in Peter's language: what was done last, what is open, what needs Peter, and the next step. Then wait for his request." ;;
+    esac
+}
+
+add_summary() {  # add_summary <message var> <context var> <job yes|no> <RC_DIR> <transcript> <source...>: put the request in place
+    local -n _m="$1" _c="$2"
+    local job="$3" dir="$4" cur="$5" req
+    shift 5
+    if [[ "$job" == yes ]]; then
+        req="$(summary_request job "$dir" "$cur" "$@")"
+        [[ -n "$req" ]] && _c+="${_c:+ }${req}"
+    elif [[ -n "$_m" ]]; then
+        req="$(summary_request brief "$dir" "$cur" "$@")"
+        [[ -n "$req" ]] && _m+=$'\n\n'"$req"
+    else
+        _m="$(summary_request start "$dir" "$cur" "$@")"
+    fi
+    return 0
 }
 
 take_brief() {  # take_brief <role>: print and remove the pending brief (atomic: one session takes it)
@@ -1400,16 +1517,25 @@ take_reboot_note() {  # take_reboot_note <RC_DIR>: print the restored session's 
     printf '[reboot] %s restarted for its nightly updates (%s) and restored this session. Background tasks, monitors and waits from before the reboot are gone: check what you were working on or waiting for (.agents/session-handoff.md, your last messages) and continue it; if nothing was pending, reply with one short line and wait.' "$(hostname -s)" "$when"
 }
 
-hook_reboot_note() {  # global SessionStart hook: the note for roles without an own start hook
-    local note
-    cat >/dev/null
+hook_session_start() {  # global SessionStart hook (also as reboot-note): start summary and reboot note for roles without an own start hook
+    local input src rid role message="" context="" note
+    input="$(cat)"
     case "${RC_DIR:-}" in
-        ""|"$CODE_DIR"|"$SLOTS_DIR"/*|"$RESEARCH_SLOTS"/*|"$TRIPS_DIR"/*) return 0 ;;  # their own hooks deliver it
+        ""|"$CODE_DIR"|"$SLOTS_DIR"/*|"$RESEARCH_SLOTS"/*|"$TRIPS_DIR"/*) return 0 ;;  # their own hooks deliver both
     esac
     [[ "$RC_DIR" == "$PROJECTS_HOME"/* ]] && project_has_hook "$RC_DIR" && return 0  # so does a project's
+    role="$(role_of_dir "$RC_DIR")"
+    if [[ -n "$role" && "$role" != greeter && "$role" != travel-greeter ]]; then  # the Greeters keep their own start
+        src="$(jq -r '.source // empty' <<< "$input" 2>/dev/null || true)"
+        rid="$(remote_session_id)"
+        if summary_due "$role" "$rid" "$src"; then
+            add_summary message context no "$RC_DIR" "$(jq -r '.transcript_path // empty' <<< "$input" 2>/dev/null || true)" "$RC_DIR"
+        fi
+    fi
     note="$(take_reboot_note "$RC_DIR")"
-    [[ -n "$note" ]] || return 0
-    jq -n --arg m "$note" '{hookSpecificOutput: {hookEventName: "SessionStart", initialUserMessage: $m}}'
+    if [[ -n "$note" ]]; then [[ -n "$message" ]] && message+=$'\n\n'; message+="$note"; fi
+    [[ -n "$message" ]] || return 0
+    jq -n --arg m "$message" '{hookSpecificOutput: {hookEventName: "SessionStart", initialUserMessage: $m}}'
 }
 
 cmd_restore() {  # start the roles that ran before a reboot; prints one summary line, or nothing
@@ -1423,7 +1549,7 @@ cmd_restore() {  # start the roles that ran before a reboot; prints one summary 
         remote_role_target "$role" >/dev/null && { rm -f -- "$f"; continue; }  # runs on its own host
         systemctl --user is-active --quiet "$(unit "$role")" && continue
         # The roles ran here before the reboot; no peer check (it would delay the Greeter's start per role)
-        if out="$( (RC_PEER_CHECK=no; cmd_up "$role") 2>&1 )"; then
+        if out="$( (RC_PEER_CHECK=no; RC_SUMMARY_MARK=no; cmd_up "$role") 2>&1 )"; then  # a restore is not Peter's start
             ok+=("$(conf_get "$role" RC_NAME)")
         else
             failed+=("$(conf_get "$role" RC_NAME) (${out##*rc: })")
@@ -1494,7 +1620,7 @@ hook_turn_done() {  # Stop hook (~/.claude/settings.json): a turn of 1 min+ ends
 }
 
 hook_research_session() {  # SessionStart hook of research topic roles (helper folders in Research/.rc)
-    local input src slug slot topic job rid brief message="" note=""
+    local input src slug slot topic job rid brief message="" note="" context="" due=no job_brief=no
     input="$(cat)"
     case "${RC_DIR:-}" in
         "$RESEARCH_SLOTS"/*) slug="${RC_DIR#"$RESEARCH_SLOTS"/}" ;;
@@ -1507,39 +1633,44 @@ hook_research_session() {  # SessionStart hook of research topic roles (helper f
     rid="$(remote_session_id)"
     mkdir -p "$RESEARCH_REMOTE"
     find "$RESEARCH_REMOTE" -maxdepth 1 -type f -mtime +30 -delete
-    if [[ "$src" == startup && ! ( -n "$rid" && -f "${RESEARCH_REMOTE}/${rid}" ) ]]; then
-        if mkdir "$slot/.started" 2>/dev/null; then  # atomic: only the first session starts the research
-            message="[deep-research] Load the deep-research skill and research this topic, then store the result in the job folder as ~/Obsidian/Adrixan/Research/AGENTS.md describes: ${topic}"
-        else
-            message="[deep-research] ${topic}: read report.md, sources.md and the handoff, then reply with a short status (report status, main findings, open questions) and ask what to dig into next."
-        fi
+    summary_due "research-${slug}" "$rid" "$src" && due=yes
+    if [[ "$src" == startup && ! ( -n "$rid" && -f "${RESEARCH_REMOTE}/${rid}" ) ]] && mkdir "$slot/.started" 2>/dev/null; then
+        # atomic: only the first session starts the research; a new topic has nothing to summarise
+        message="[deep-research] Load the deep-research skill and research this topic, then store the result in the job folder as ~/Obsidian/Adrixan/Research/AGENTS.md describes: ${topic}"
+        due=no
     fi
+    brief_from_job "research-${slug}" && job_brief=yes
     brief="$(take_brief "research-${slug}")"
     if [[ -n "$brief" ]]; then
         [[ -n "$message" ]] || message="[deep-research] ${topic}: read report.md, sources.md and the handoff first, then continue with the context below."
         printf -v message '%s\n\nContext handed over with rc research --brief, verbatim:\n\n%s' "$message" "$brief"
     fi
+    [[ "$due" == yes ]] && add_summary message context "$job_brief" "$RC_DIR" "$(jq -r '.transcript_path // empty' <<< "$input")" \
+        "$slot" "${RESEARCH_DIR}/${job}/report.md"
     [[ -n "$rid" ]] && printf '%s\n' "$slug" > "${RESEARCH_REMOTE}/${rid}"
     note="$(take_reboot_note "${RC_DIR:-}")"
     if [[ -n "$note" ]]; then [[ -n "$message" ]] && message+=$'\n\n'; message+="$note"; fi
-    jq -n --arg c "Deep-research session on the topic: ${topic}. Job folder: ~/Obsidian/Adrixan/Research/${job} (report.md with frontmatter status running|done, sources.md); follow ~/Obsidian/Adrixan/Research/AGENTS.md for storage, report and privacy rules and run \`rc research --index\` after changing the report. This session's handoff: ${slot/#$HOME/\~}/.agents/session-handoff.md. Peter may later resume this topic with \`rc research ${slug}\` from the Greeter. ${HANDOFF_RULE}" \
+    jq -n --arg c "Deep-research session on the topic: ${topic}. Job folder: ~/Obsidian/Adrixan/Research/${job} (report.md with frontmatter status running|done, sources.md); follow ~/Obsidian/Adrixan/Research/AGENTS.md for storage, report and privacy rules and run \`rc research --index\` after changing the report. This session's handoff: ${slot/#$HOME/\~}/.agents/session-handoff.md. Peter may later resume this topic with \`rc research ${slug}\` from the Greeter. ${HANDOFF_RULE}${context:+ $context}" \
         --arg m "$message" \
         '{hookSpecificOutput: ({hookEventName: "SessionStart", additionalContext: $c} + (if $m == "" then {} else {initialUserMessage: $m} end))}'
 }
 
 hook_trip_session() {  # SessionStart hook of trip roles (Trips/<slug>/.claude/settings.json, added by rc trip)
-    local slug brief context message="" note=""
-    cat >/dev/null
+    local input slug brief context message="" note="" due=no job_brief=no
+    input="$(cat)"
     case "${RC_DIR:-}" in
         "$TRIPS_DIR"/*) slug="${RC_DIR#"$TRIPS_DIR"/}" ;;
         *) return 0 ;;
     esac
     [[ "$slug" =~ ^[a-z0-9-]+$ ]] || return 0
     context="Trip session for ~/Obsidian/Adrixan/Travel/Trips/${slug}. Peter's requests for this trip, verbatim, are in brief.md in this folder (newest last); read it with trip.md and .agents/session-handoff.md before planning. ${HANDOFF_RULE}"
+    summary_due "trip-${slug}" "$(remote_session_id)" "$(jq -r '.source // empty' <<< "$input" 2>/dev/null || true)" && due=yes
+    brief_from_job "trip-${slug}" && job_brief=yes
     brief="$(take_brief "trip-${slug}")"
     if [[ -n "$brief" ]]; then
         printf -v message '[trip-brief] Peter'"'"'s request for this trip, verbatim (also logged in brief.md):\n\n%s\n\nRead trip.md and .agents/session-handoff.md first if they exist, then plan on this basis; ask only what the request leaves open.' "$brief"
     fi
+    [[ "$due" == yes ]] && add_summary message context "$job_brief" "$RC_DIR" "$(jq -r '.transcript_path // empty' <<< "$input" 2>/dev/null || true)" "$RC_DIR"
     note="$(take_reboot_note "${RC_DIR:-}")"
     if [[ -n "$note" ]]; then [[ -n "$message" ]] && message+=$'\n\n'; message+="$note"; fi
     jq -n --arg c "$context" --arg m "$message" \
@@ -1547,22 +1678,26 @@ hook_trip_session() {  # SessionStart hook of trip roles (Trips/<slug>/.claude/s
 }
 
 hook_project_session() {  # SessionStart hook of vault project roles (Projects/<Name>/.claude/settings.json, added by rc project --brief)
-    local role brief message="" note=""
-    cat >/dev/null
+    local input role brief message="" note="" context="" due=no job_brief=no
+    input="$(cat)"
     case "${RC_DIR:-}" in
         "$PROJECTS_HOME"/*) ;;
         *) return 0 ;;
     esac
     role="$(role_of_dir "$RC_DIR")"
     [[ -n "$role" ]] || return 0
+    summary_due "$role" "$(remote_session_id)" "$(jq -r '.source // empty' <<< "$input" 2>/dev/null || true)" && due=yes
+    brief_from_job "$role" && job_brief=yes
     brief="$(take_brief "$role")"
     if [[ -n "$brief" ]]; then
         printf -v message '[project-brief] %s: context handed over with rc project --brief, verbatim:\n\n%s\n\nRead the instruction note, Wissen/, Memory/ and .agents/session-handoff.md first, then take this over; tell Peter in one line what you took over.' "${RC_DIR##*/}" "$brief"
     fi
+    [[ "$due" == yes ]] && add_summary message context "$job_brief" "$RC_DIR" "$(jq -r '.transcript_path // empty' <<< "$input" 2>/dev/null || true)" "$RC_DIR"
     note="$(take_reboot_note "$RC_DIR")"
     if [[ -n "$note" ]]; then [[ -n "$message" ]] && message+=$'\n\n'; message+="$note"; fi
-    [[ -n "$message" ]] || return 0
-    jq -n --arg m "$message" '{hookSpecificOutput: {hookEventName: "SessionStart", initialUserMessage: $m}}'
+    [[ -n "$message$context" ]] || return 0
+    jq -n --arg m "$message" --arg c "$context" \
+        '{hookSpecificOutput: ({hookEventName: "SessionStart"} + (if $m == "" then {} else {initialUserMessage: $m} end) + (if $c == "" then {} else {additionalContext: $c} end))}'
 }
 
 project_has_hook() {  # project_has_hook <folder>: its settings carry the project-session start hook
@@ -1575,7 +1710,7 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
         research-session) hook_research_session; return 0 ;;
         trip-session) hook_trip_session; return 0 ;;
         project-session) hook_project_session; return 0 ;;
-        reboot-note) hook_reboot_note; return 0 ;;
+        session-start|reboot-note) hook_session_start; return 0 ;;  # reboot-note: the name before 2026-11-23
         greeter-slash) hook_greeter_slash; return 0 ;;
     esac
     if [[ "${1:-}" == greeter-start ]]; then  # no start menu (Peter, 2026-11-10): a turn only to report a restore
@@ -1588,7 +1723,7 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
         return 0
     fi
     [[ "${1:-}" == code-session ]] || usage
-    local input src sid rid project="" context message="" seen=no brief="" note=""
+    local input src sid rid project="" context message="" seen=no brief="" note="" due=no job_brief=no role cur
     input="$(cat)"
     case "${RC_DIR:-}" in  # only sessions of rc's servers; an interactive `claude` stays untouched
         "$CODE_DIR") ;;
@@ -1607,18 +1742,32 @@ cmd_hook() {  # SessionStart hooks: code-session for Code and project roles, gre
     fi
     [[ -n "$(focus_of_remote "$rid")" || ( -n "$sid" && -f "${FOCUS_SESSIONS}/${sid}" ) ]] && seen=yes
     [[ "$project" =~ $PROJECT_RE && -d "${CODE_DIR}/${project}" ]] || project=""
+    role="$(role_of_dir "$RC_DIR")"
+    cur="$(jq -r '.transcript_path // empty' <<< "$input")"
+    [[ -n "$role" ]] && summary_due "$role" "$rid" "$src" && due=yes
     if [[ -n "$project" ]]; then
         [[ -n "$sid" ]] && printf '%s\n' "$project" > "${FOCUS_SESSIONS}/${sid}"
         [[ -n "$rid" ]] && printf '%s\n' "$project" > "${FOCUS_REMOTE}/${rid}"
         printf '%s\t%s\n' "$(date +%s)" "$project" >> "$FOCUS_LOG"
         context="$(focus_context "$project" "${RC_DIR/#$HOME/\~}")"
-        # A reattached session already knows its project; a new one starts with a status turn
-        [[ "$src" == startup && "$seen" == no ]] && message="[code-focus] ${project}: read the project's AGENTS.md and .agents/ state, then reply with a short status (branch, uncommitted changes, next steps from the handoff) and ask what to do."
+        brief_from_job "$(code_role "$project")" && job_brief=yes
         brief="$(take_brief "$(code_role "$project")")"
         [[ -n "$brief" ]] && printf -v message '[handoff] %s: context handed over with rc code --brief, verbatim:\n\n%s\n\nRead the project'"'"'s AGENTS.md and .agents/ state first, then take this over; tell Peter in one line what you took over.' "$project" "$brief"
         context+=" ${HANDOFF_RULE}"
+        # The start summary (a new session, or a reattached one after rc up) from the project's state files
+        [[ "$due" == yes ]] && add_summary message context "$job_brief" "$RC_DIR" "$cur" "${CODE_DIR}/${project}"
+        if [[ -z "$message" && "$src" == startup && "$seen" == no ]]; then  # a project without any earlier state
+            message="[code-focus] ${project}: read the project's AGENTS.md and .agents/ state, then reply with a short status (branch, uncommitted changes, next steps from the handoff) and ask what to do."
+        elif [[ "$message" == "[session-summary]"* ]]; then
+            message+=" For this code project the summary also names the branch and uncommitted changes."
+        fi
     else
         context="General Code role session in ~/code without a chosen project. Unless Peter's first message names one, ask with AskUserQuestion which folder in ~/code to work on: run \`rc projects\` and offer the three most recently used by folder name plus \"New project\" (create ~/code/<name> with AGENTS.md and a CLAUDE.md containing @AGENTS.md); his free text takes any name. Then treat that folder as the project root: read its AGENTS.md and .agents/ state first, run commands and git there, keep its handoff in its .agents/. For a dedicated session per project (several in parallel), Peter uses the Greeter or \`rc code <project>\`. Projects whose .claude/settings.json denies MCP servers (client repositories) are off limits here: they need \`rc code --own <project>\`."
+        # The general role's own cross-project log; the project question follows the summary
+        if [[ "$due" == yes ]]; then
+            add_summary message context no "$RC_DIR" "$cur" "$RC_DIR"
+            [[ "$message" == "[session-summary]"* ]] && message="${message% Then wait for his request.} Then ask which project to work on, as the session context says (unless his first message names one)."
+        fi
     fi
     note="$(take_reboot_note "${RC_DIR:-}")"
     if [[ -n "$note" ]]; then [[ -n "$message" ]] && message+=$'\n\n'; message+="$note"; fi
@@ -2029,7 +2178,7 @@ set -- "${MAIN_ARGS[@]}"
 if [[ -n "$ON_HOST" ]]; then
     ON_HOST="$(host_canon "$ON_HOST")"
     if [[ "$ON_HOST" != "$(local_host)" ]]; then
-        case "${1:-ls}" in stop-wait|handoff-done|slash|sync-confs|restore|quiet|prepare-reboot) die "rc ${1}: only on this machine" ;; esac
+        case "${1:-ls}" in stop-wait|handoff-done|slash|sync-confs|restore|quiet|prepare-reboot|summary-seed) die "rc ${1}: only on this machine" ;; esac
         host_rc "$ON_HOST" "$@"; exit $?
     fi
 fi
@@ -2082,6 +2231,7 @@ case "${1:-ls}" in
     restore) cmd_restore ;;
     quiet) shift; cmd_quiet "$@" ;;
     prepare-reboot) cmd_prepare_reboot ;;
+    summary-seed) cmd_summary_seed ;;
     sync-confs) cmd_sync_confs ;;
     lease) shift; cmd_lease "$@" ;;
     *) usage ;;
