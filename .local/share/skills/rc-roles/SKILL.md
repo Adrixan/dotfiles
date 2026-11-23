@@ -112,6 +112,23 @@ busy-session guards.
   report, sources and handoff and replies with a status. `rc researches` lists the topics with report
   status; `rc research --index` rewrites `Research/index.md`. Results always land in the vault (rules in
   `Research/AGENTS.md`).
+- Start summary (Peter, 2026-11-23: "any session I start, no matter the type, provides a brief summary, if
+  it has existed before"): every rc start hook asks a session of a role with an earlier state to open with
+  at most 5 lines (done last, open, needs Peter, next step). One shared helper in rc serves all types: the
+  global SessionStart hook `rc hook session-start` (`reboot-note` is its old name, still accepted) for
+  roles without an own hook (teaching, phd, research, projects, custom roles such as BIMM, vault projects,
+  educator on edu-micro), and `code-session`, `research-session`, `trip-session`, `project-session` in their
+  folders. Sources: the folder's `.agents/session-handoff.md`, `project-state.md`, `plan.md`, `to-do.md`
+  (code project roles: the project's in `~/code`; trips also `trip.md`; research topics also `report.md`);
+  without those a vault project's newest `Memory/` and `Chats/` note; else the newest earlier transcript. A
+  fresh role stays quiet. Due for every new session, and once for a reattached one when `rc up` started the
+  role in the last 20 min; never after `rc restart`, `rc restore`, a reboot (the reboot note comes alone),
+  a compaction or a `claude -p` probe. A queued brief comes first, the summary request follows it; a brief
+  queued by a scheduled job (systemd service outside a role: aspirations, repo security scan;
+  `RC_BRIEF_ORIGIN=job` forces it, `=peter` clears it) wins, and the summary shrinks to one context line.
+  The Greeter and the Travel Greeter keep their own start. State: `~/.local/state/claude-rc/summary-seen/`
+  (sessions) and `summary-due/` (rc up); `rc summary-seed` records the live sessions as seen (once per
+  host at rollout). Tests: `~/.local/share/rc/test_session_summary.sh <abs scratch dir>`.
 - `rc menu`: running roles (with pending stops), stopped fixed and custom roles, trips, research topics,
   vault projects, recent code projects and free RAM in one
   listing (`/menu` in the Greeter).
