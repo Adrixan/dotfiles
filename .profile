@@ -26,13 +26,13 @@ test -z "$PROFILEREAD" && . /etc/profile || true
 
 
 # Added by Toolbox App
-export PATH="$PATH:/home/Adrixan/.local/share/JetBrains/Toolbox/scripts"
+[ -d "$HOME/.local/share/JetBrains/Toolbox/scripts" ] && export PATH="$PATH:$HOME/.local/share/JetBrains/Toolbox/scripts"
 
-. "$HOME/.cargo/env"
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
 
 # Added by Antigravity CLI installer
-export PATH="/home/Adrixan/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
 
-. "$HOME/.local/share/../bin/env"
+[ -f "$HOME/.local/bin/env" ] && . "$HOME/.local/bin/env"
 

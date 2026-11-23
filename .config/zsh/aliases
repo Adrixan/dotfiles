@@ -1,7 +1,11 @@
 alias :e='nvim'
 alias rm='rm -vI'
 alias a2d='aria2c -x3'
-alias sysup='sudo zypper ref --force; sudo zypper dup'
+if [[ -n ${TERMUX_VERSION:-} ]]; then
+  alias sysup='pkg upgrade && ~/.local/bin/termux-sync'
+else
+  alias sysup='sudo zypper ref --force; sudo zypper dup'
+fi
 alias topup='topgrade -y -c --no-retry'
 
 c() { printf "%s\n" "$@" | bc -l; }
