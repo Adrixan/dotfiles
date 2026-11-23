@@ -8,3 +8,6 @@
 .config/edu-publish/config.toml
 code/helbling-media-downloader/.env.local
 code/petersgasse.at/.env
+.newspaper.env
+.config/termux-ssh/tunnel-token
+.config/termux-ssh/ssh_host_ed25519_key
