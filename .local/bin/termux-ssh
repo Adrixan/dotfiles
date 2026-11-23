@@ -1,0 +1,206 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# termux-ssh: shell access to the phone's Termux for the workstations and their agents, started by hand.
+#
+# Path: workstation `ssh termux` -> Cloudflare Tunnel `termux` (ssh-termux hostname, no Access, like the
+# other machines) -> cloudflared on the phone -> sshd on 127.0.0.1:8022 (key only). Nothing starts at
+# boot and nothing listens on a phone interface; sshd and cloudflared run only between `on` and `off`.
+#
+# Usage:
+#   termux-ssh setup [--no-install]  install openssh, cloudflared, gnupg; write the private sshd config;
+#                                    import the gpg-encrypted tunnel token from the Syncthing folder;
+#                                    print the block to paste to the agent
+#   termux-ssh on [MINUTES]          start sshd and the tunnel, hold a wake lock; stop again after
+#                                    MINUTES (default 120, 0 = until `termux-ssh off`)
+#   termux-ssh off                   stop both and release the wake lock
+#   termux-ssh status                what runs, last log lines
+#
+# Secrets: the tunnel token arrives encrypted to the phone's own gpg key in shared storage
+# (~/storage/shared/sync/ai/termux/cloudflared-token.gpg), is decrypted into Termux's private home
+# (mode 0600) and the encrypted copy is deleted. It reaches cloudflared through the environment, never
+# argv. Shared storage ignores file modes, so nothing secret is ever written there.
+set -euo pipefail
+umask 077
+
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+CONF="$HOME/.config/termux-ssh"
+STATE="$HOME/.cache/termux-ssh"
+SHARED="${TERMUX_SSH_SHARED:-$HOME/storage/shared/sync/ai/termux}"
+TOKEN_FILE="$CONF/tunnel-token"
+SSHD_CONFIG="$CONF/sshd_config"
+HOSTKEY="$PREFIX/etc/ssh/ssh_host_ed25519_key"
+PORT=8022
+DEFAULT_MINUTES=120
+
+die() { printf 'termux-ssh: %s\n' "$*" >&2; exit 1; }
+say() { printf '%s\n' "$*"; }
+
+[[ -n "${TERMUX_VERSION:-}" ]] || die "runs only inside Termux (TERMUX_VERSION is not set)"
+
+pid_alive() { [[ -s "$1" ]] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+write_sshd_config() {
+    mkdir -p "$CONF" "$STATE"
+    cat > "$SSHD_CONFIG" <<EOF
+# Written by termux-ssh setup; rewritten on every setup run.
+Port $PORT
+ListenAddress 127.0.0.1
+HostKey $HOSTKEY
+PidFile $STATE/sshd.pid
+AuthorizedKeysFile .ssh/authorized_keys
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+AuthenticationMethods publickey
+MaxAuthTries 3
+LoginGraceTime 30
+AllowAgentForwarding no
+AllowTcpForwarding local
+GatewayPorts no
+PermitTunnel no
+X11Forwarding no
+PermitUserEnvironment no
+ClientAliveInterval 60
+ClientAliveCountMax 3
+PrintMotd no
+LogLevel VERBOSE
+Subsystem sftp $PREFIX/libexec/sftp-server
+EOF
+    chmod 600 "$SSHD_CONFIG"
+}
+
+import_token() {
+    local enc="$SHARED/cloudflared-token.gpg" tmp
+    if [[ -f "$enc" ]]; then
+        say "Decrypting the tunnel token (gpg asks for the phone key's passphrase) ..."
+        tmp="$(mktemp "$CONF/token.XXXXXX")"
+        if ! gpg --quiet --decrypt --output - "$enc" > "$tmp"; then
+            rm -f "$tmp"; die "gpg could not decrypt $enc"
+        fi
+        # A tunnel token is one line of base64; refuse anything else before it replaces the old one.
+        if ! grep -Eqx '[A-Za-z0-9+/=_-]{100,}' "$tmp"; then
+            rm -f "$tmp"; die "decrypted token has an unexpected format; nothing changed"
+        fi
+        mv -f "$tmp" "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"
+        rm -f "$enc"
+        say "Token stored in $TOKEN_FILE; encrypted copy removed from shared storage."
+    elif [[ -s "$TOKEN_FILE" ]]; then
+        say "Tunnel token already present."
+    else
+        say "WARNING: no tunnel token yet ($enc missing). Ask the agent for it, then run setup again."
+    fi
+}
+
+cmd_setup() {
+    local install=1
+    [[ "${1:-}" == "--no-install" ]] && install=0
+    if (( install )); then
+        pkg install -y openssh cloudflared gnupg
+    fi
+    command -v sshd >/dev/null || die "sshd missing (pkg install openssh)"
+    command -v cloudflared >/dev/null || die "cloudflared missing (pkg install cloudflared)"
+
+    mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+    touch "$HOME/.ssh/authorized_keys"; chmod 600 "$HOME/.ssh/authorized_keys"
+    local nkeys
+    nkeys="$(grep -Ec '^(ssh-(ed25519|rsa)|ecdsa-sha2-|sk-)' "$HOME/.ssh/authorized_keys" || true)"
+    (( nkeys > 0 )) || say "WARNING: ~/.ssh/authorized_keys has no key; run 'yadm pull' first."
+
+    [[ -f "$HOSTKEY" ]] || ssh-keygen -q -t ed25519 -N '' -f "$HOSTKEY"
+    write_sshd_config
+    "$PREFIX/bin/sshd" -t -f "$SSHD_CONFIG" || die "sshd rejected $SSHD_CONFIG"
+    import_token
+
+    local android termux_v cfd token_state=missing
+    android="$(getprop ro.build.version.release 2>/dev/null || echo '?')"
+    termux_v="${TERMUX_VERSION}"
+    cfd="$(cloudflared --version 2>/dev/null | head -n1 | awk '{print $3}')"
+    [[ -s "$TOKEN_FILE" ]] && token_state=ok
+    say ""
+    say "Setup done. Paste the block between the scissors to the agent:"
+    say "----- 8< termux-ssh -----"
+    say "android=$android termux=$termux_v arch=$(uname -m) cloudflared=$cfd"
+    say "authorized_keys=$nkeys token=$token_state"
+    say "hostkey=$(cut -d' ' -f1,2 "$HOSTKEY.pub")"
+    say "fingerprint=$(ssh-keygen -lf "$HOSTKEY.pub" | awk '{print $2}')"
+    say "----- >8 -----"
+    say "Then start it when needed: termux-ssh on   (stop: termux-ssh off)"
+}
+
+cmd_on() {
+    local minutes="${1:-$DEFAULT_MINUTES}"
+    [[ "$minutes" =~ ^[0-9]+$ ]] || die "MINUTES must be a whole number"
+    [[ -f "$SSHD_CONFIG" ]] || die "no sshd config; run 'termux-ssh setup' first"
+    [[ -s "$TOKEN_FILE" ]] || die "no tunnel token; run 'termux-ssh setup' first"
+    mkdir -p "$STATE"
+    termux-wake-lock 2>/dev/null || true
+
+    if pid_alive "$STATE/sshd.pid"; then
+        say "sshd already running"
+    else
+        "$PREFIX/bin/sshd" -f "$SSHD_CONFIG" -E "$STATE/sshd.log" || die "sshd failed to start (see $STATE/sshd.log)"
+        say "sshd listening on 127.0.0.1:$PORT"
+    fi
+
+    if pid_alive "$STATE/cloudflared.pid"; then
+        say "tunnel already running"
+    else
+        # http2 over TCP: networks that block UDP (school Wi-Fi) never let QUIC fall back in time.
+        TUNNEL_TOKEN="$(cat "$TOKEN_FILE")" nohup cloudflared tunnel --no-autoupdate --protocol http2 \
+            --loglevel info run >> "$STATE/cloudflared.log" 2>&1 &
+        echo $! > "$STATE/cloudflared.pid"
+        sleep 5
+        pid_alive "$STATE/cloudflared.pid" || { cmd_off >/dev/null; die "cloudflared exited (see $STATE/cloudflared.log)"; }
+        say "tunnel up (log: $STATE/cloudflared.log)"
+    fi
+
+    if pid_alive "$STATE/timer.pid"; then kill "$(cat "$STATE/timer.pid")" 2>/dev/null || true; fi
+    rm -f "$STATE/timer.pid"
+    if (( minutes > 0 )); then
+        # shellcheck disable=SC2016  # $1 and $2 belong to the inner bash
+        nohup bash -c 'sleep "$1" && exec "$2" off' _ "$(( minutes * 60 ))" "$(command -v termux-ssh || echo "$0")" \
+            >> "$STATE/timer.log" 2>&1 &
+        echo $! > "$STATE/timer.pid"
+        say "stops automatically in $minutes min (termux-ssh on 0: no limit)"
+    fi
+}
+
+stop_pid() {
+    local f="$1" name="$2"
+    if pid_alive "$f"; then
+        kill "$(cat "$f")" 2>/dev/null || true
+        say "$name stopped"
+    fi
+    rm -f "$f"
+}
+
+cmd_off() {
+    mkdir -p "$STATE"
+    stop_pid "$STATE/cloudflared.pid" "tunnel"
+    stop_pid "$STATE/sshd.pid" "sshd"
+    # The timer execs `termux-ssh off`, so then its pid is this process: never kill ourselves.
+    if [[ -s "$STATE/timer.pid" && "$(cat "$STATE/timer.pid")" != "$$" ]]; then
+        stop_pid "$STATE/timer.pid" "timer"
+    fi
+    rm -f "$STATE/timer.pid"
+    termux-wake-unlock 2>/dev/null || true
+    say "off"
+}
+
+cmd_status() {
+    local f
+    for f in sshd cloudflared timer; do
+        if pid_alive "$STATE/$f.pid"; then say "$f: running (pid $(cat "$STATE/$f.pid"))"; else say "$f: stopped"; fi
+    done
+    if [[ -s "$TOKEN_FILE" ]]; then say "token: present"; else say "token: missing"; fi
+    if [[ -f "$STATE/cloudflared.log" ]]; then say "--- cloudflared.log (last 5)"; tail -n 5 "$STATE/cloudflared.log"; fi
+    if [[ -f "$STATE/sshd.log" ]]; then say "--- sshd.log (last 5)"; tail -n 5 "$STATE/sshd.log"; fi
+}
+
+case "${1:-}" in
+    setup)  shift; cmd_setup "$@" ;;
+    on)     shift; cmd_on "$@" ;;
+    off)    cmd_off ;;
+    status) cmd_status ;;
+    *)      sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
