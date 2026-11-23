@@ -1,0 +1,10 @@
+# openSUSE's /etc/zshrc defaults (options and portable aliases), so shells without that file (Termux)
+# behave like the workstations. On openSUSE this repeats what /etc/zshrc set just before. Sourced first
+# by ~/.zshrc, so grml and the own files still override it in the same order as on the workstations.
+# Left out: `you` (YaST online update) and the --color=auto aliases for grep, fgrep, egrep and ip.
+setopt nocorrect pushdtohome autolist nopromptcr nocorrectall autocd recexact longlistjobs \
+  histignoredups pushdsilent appendhistory histexpiredupsfirst autopushd pushdminus extendedglob rcquotes
+unsetopt bgnice autoparamslash hup
+alias ..='cd ..' ...='cd ../..' cd..='cd ..' md='mkdir -p' rd=rmdir o=less dir='ls -l' ls-l='ls -l'
+alias beep='printf "\a"'
+alias unmount='echo "Error: Try the command: umount" 1>&2; false'
