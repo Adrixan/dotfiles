@@ -1,0 +1,265 @@
+#!/usr/bin/env sh
+# book-upload: upload books to the private Kavita library at books.code-alongsi.de.
+#
+# Usage: book-upload [-n|--dry-run] FILE|DIR...
+#        book-upload --check     test the connection and the key, upload nothing
+#        book-upload --setup     create this device's upload key and print its public key
+#
+# FILE goes to "<name>/<file>" on the server. DIR uploads every book below it and keeps the
+# subfolders; books lying directly in DIR get a folder of their own, like single files.
+# Hidden files and folders are left out. A name that already exists on the server is never
+# replaced (the server enforces this), so such books count as "already on the server".
+# After an interruption, run it again: finished books are skipped, an unfinished one starts
+# over (rsync writes to a temporary name, so no half book appears). Kavita lists new books
+# after its next library scan (see the line printed after an upload).
+#
+# Environment:
+#   BOOK_UPLOAD_DEST   rsync target            (default bookup@books.code-alongsi.de:)
+#   BOOK_UPLOAD_KEY    private key             (default ~/.ssh/id_ed25519_books; empty: ssh config)
+#   BOOK_UPLOAD_TYPES  extensions to upload    (default "epub pdf": what the library reads)
+#   BOOK_UPLOAD_SSH    ssh command             (default ssh)
+#
+# Exit codes: 0 every book is on the server; 1 some books failed; 2 usage error, nothing to
+# upload or a tool is missing; 3 server unreachable or the key was refused.
+set -u
+umask 077
+unset CDPATH
+
+prog=book-upload
+dest=${BOOK_UPLOAD_DEST:-bookup@books.code-alongsi.de:}
+key=${BOOK_UPLOAD_KEY-$HOME/.ssh/id_ed25519_books}
+types=${BOOK_UPLOAD_TYPES:-epub pdf}
+sshcmd=${BOOK_UPLOAD_SSH:-ssh}
+host=${dest%%:*}
+host=${host#*@}
+# Formats Kavita cannot read; named in the skip message so the fix is obvious.
+convert_types="mobi azw azw3 azw4 kfx fb2 djvu djv lit lrf prc pdb"
+archive_types="cbz cbr cb7 cbt zip rar 7z"
+nl='
+'
+
+say() { printf '%s\n' "$*"; }
+err() { printf '%s: %s\n' "$prog" "$*" >&2; }
+usage() { sed -n '2,23s/^# \{0,1\}//p' "$0"; }
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+in_list() { # in_list WORD "LIST": WORD is one of the blank-separated words
+  case " $2 " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+human() { # human BYTES
+  awk -v b="$1" 'BEGIN { if (b >= 1048576) printf "%.1f MB", b / 1048576; else printf "%.0f kB", b / 1024 }'
+}
+
+setup() {
+  case $key in
+    "$HOME"/storage/* | /storage/* | /sdcard/*)
+      err "keep the key in the private home, not on shared storage: $key"
+      return 2 ;;
+  esac
+  if [ -e "$key" ]; then
+    say "key exists: $key"
+  else
+    command -v ssh-keygen >/dev/null 2>&1 || { err "ssh-keygen missing (Termux: pkg install openssh)"; return 2; }
+    mkdir -p "$(dirname "$key")" && chmod 700 "$(dirname "$key")" || return 2
+    if [ -n "${TERMUX_VERSION:-}" ]; then device=termux; else device=$(uname -n); fi
+    ssh-keygen -q -t ed25519 -N '' -C "book-upload $device" -f "$key" || return 2
+    say "created $key (upload-only key, no passphrase)"
+  fi
+  say "public key, to be added on the server once:"
+  cat "$key.pub"
+}
+
+# shellcheck disable=SC2329 # called by the EXIT trap
+cleanup() {
+  if [ -n "${work:-}" ]; then
+    # shellcheck disable=SC2086 # BOOK_UPLOAD_SSH may carry options
+    [ -S "$work/ssh" ] && $sshcmd -o ControlPath="$work/ssh" -O exit "${dest%%:*}" >/dev/null 2>&1
+    rm -rf "$work"
+  fi
+}
+
+dry=0 check=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    -n | --dry-run) dry=1 ;;
+    --check) check=1 ;;
+    --setup) setup; exit $? ;;
+    -h | --help) usage; exit 0 ;;
+    --) shift; break ;;
+    -*) err "unknown option $1 (see --help)"; exit 2 ;;
+    *) break ;;
+  esac
+  shift
+done
+[ $# -gt 0 ] || [ $check -eq 1 ] || { usage >&2; exit 2; }
+
+command -v rsync >/dev/null 2>&1 || {
+  err "rsync missing (openSUSE: sudo zypper install rsync; Termux: pkg install rsync openssh)"
+  exit 2
+}
+if [ -n "$key" ]; then
+  [ -r "$key" ] || { err "no upload key at $key: run '$prog --setup' first"; exit 2; }
+  case $key in *"'"*) err "the key path must not contain a single quote"; exit 2 ;; esac
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/book-upload.XXXXXX") || { err "cannot create a temporary folder"; exit 2; }
+trap cleanup EXIT
+trap 'err "interrupted: run the same command again to continue"; exit 130' INT TERM
+stage=$work/stage
+mkdir "$stage" || exit 2
+: >"$work/staged"
+
+rsh="$sshcmd -o ControlMaster=auto -o ControlPath='$work/ssh' -o ControlPersist=120"
+rsh="$rsh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+[ -n "$key" ] && rsh="$rsh -i '$key' -o IdentitiesOnly=yes"
+
+skipped=0
+skip() { # skip PATH REASON
+  skipped=$((skipped + 1))
+  say "skipped   $1 ($2)"
+}
+
+# add SOURCE DEST: stage one book under its server path
+add() {
+  src=$1 d=$2
+  case $d in *[[:cntrl:]]*) skip "$src" "control characters in the name"; return ;; esac
+  base=${d##*/}
+  case $base in *.*) ext=$(lower "${base##*.}") ;; *) ext= ;; esac
+  if ! in_list "$ext" "$types"; then
+    if [ -z "$ext" ]; then why="no file extension"
+    elif in_list "$ext" "$convert_types"; then why="Kavita cannot read $ext; convert it to epub, e.g. with Calibre's ebook-convert"
+    elif in_list "$ext" "$archive_types"; then why="$ext needs the Archive file type in the Kavita library, then BOOK_UPLOAD_TYPES"
+    else why="not a book"
+    fi
+    skip "$src" "$why"
+    return
+  fi
+  [ -r "$src" ] || { skip "$src" "not readable"; return; }
+  if [ -e "$stage/$d" ] || [ -L "$stage/$d" ]; then
+    skip "$src" "a second file for $d"
+    return
+  fi
+  case $src in /*) abs=$src ;; *) abs=$PWD/$src ;; esac
+  if ! { mkdir -p "$stage/${d%/*}" && ln -s "$abs" "$stage/$d"; }; then
+    skip "$src" "cannot stage it"
+    return
+  fi
+  printf '%s\n' "$d" >>"$work/staged"
+}
+
+# File directly given or directly in DIR: "<name without extension>/<file>".
+own_folder() {
+  b=${1##*/}
+  case $b in *.?*) printf '%s/%s' "${b%.*}" "$b" ;; *) printf '%s/%s' "$b" "$b" ;; esac
+}
+
+for arg in "$@"; do
+  arg_t=${arg%/}
+  [ -n "$arg_t" ] || arg_t=/
+  if [ -d "$arg" ]; then
+    n_odd=$(cd -- "$arg" && find . -name "*$nl*" -print | wc -l)
+    [ "$n_odd" -gt 0 ] && skip "$arg" "left out names with line breaks"
+    list=$work/list
+    (cd -- "$arg" && find . \( -name '.?*' -o -name "*$nl*" \) -prune -o -type f -print) >"$list" \
+      || { skip "$arg" "cannot read the folder"; continue; }
+    while IFS= read -r rel; do
+      rel=${rel#./}
+      case $rel in
+        */*) d=$rel ;;
+        *) d=$(own_folder "$rel") ;;
+      esac
+      add "$arg_t/$rel" "$d"
+    done <"$list"
+  elif [ -f "$arg" ]; then
+    add "$arg" "$(own_folder "$arg_t")"
+  elif [ -e "$arg" ]; then
+    skip "$arg" "not a regular file or folder"
+  else
+    skip "$arg" "does not exist"
+  fi
+done
+
+n_staged=$(wc -l <"$work/staged" | tr -d ' ')
+if [ "$n_staged" -eq 0 ] && [ $check -eq 0 ]; then
+  err "nothing to upload"
+  exit 2
+fi
+
+# Common rsync options. The server runs rrsync (write-only, no delete, no overwrite).
+set -- -rtpLO8 --chmod=D2750,F640 --ignore-existing --timeout=120 -e "$rsh"
+
+# Probe: which staged files are new on the server; also proves the connection and the key.
+rsync "$@" -n --out-format='%i|%n' "$stage/" "$dest" >"$work/probe" 2>"$work/err"
+rc=$?
+if [ $rc -ne 0 ]; then
+  if grep -q 'Permission denied' "$work/err"; then
+    err "the server refused this device's key: run '$prog --setup' and have the public key added"
+  elif [ $rc -eq 255 ]; then
+    err "cannot reach $host (network, DNS or SSH); nothing uploaded"
+  else
+    err "the server refused the connection (rsync exit $rc): is this device's key added on the server?"
+  fi
+  sed -n '1,3s/^/  /p' "$work/err" >&2
+  exit 3
+fi
+sed -n 's/^<f[^|]*|//p' "$work/probe" >"$work/new"
+
+if [ $check -eq 1 ]; then
+  say "ok: $host reachable, upload key accepted"
+  [ "$n_staged" -eq 0 ] && exit 0
+  dry=1
+fi
+
+n_new=0 n_have=0
+if [ $dry -eq 1 ]; then
+  while IFS= read -r d; do
+    if grep -Fxq -- "$d" "$work/new"; then
+      n_new=$((n_new + 1))
+      say "would add $d ($(human "$(wc -c <"$stage/$d")"))"
+    else
+      n_have=$((n_have + 1))
+      say "exists    $d"
+    fi
+  done <"$work/staged"
+  say "dry run: $n_new to upload, $n_have already on the server, $skipped skipped"
+  exit 0
+fi
+
+if [ -s "$work/new" ]; then
+  if [ -t 1 ]; then progress=--info=progress2; else progress=--info=progress0; fi
+  rsync "$@" "$progress" --log-file="$work/log" --log-file-format='%i|%n' "$stage/" "$dest" 2>"$work/err"
+  rc=$?
+else
+  rc=0
+  : >"$work/log"
+fi
+sed -n 's/^[^]]*\] <f[^|]*|//p' "$work/log" >"$work/sent"
+
+n_fail=0
+while IFS= read -r d; do
+  if grep -Fxq -- "$d" "$work/sent"; then
+    n_new=$((n_new + 1))
+    say "uploaded  $d ($(human "$(wc -c <"$stage/$d")"))"
+  elif grep -Fxq -- "$d" "$work/new"; then
+    n_fail=$((n_fail + 1))
+    say "FAILED    $d"
+  else
+    n_have=$((n_have + 1))
+    say "exists    $d"
+  fi
+done <"$work/staged"
+
+say "$n_new uploaded, $n_have already on the server, $skipped skipped, $n_fail failed"
+[ $n_new -gt 0 ] && say "Kavita lists new books after its next library scan: nightly at 00:00, at once with Scan Library, within minutes if Folder Watching is on."
+if [ $rc -ne 0 ]; then
+  if [ $rc -eq 255 ] || [ $rc -eq 30 ] || [ $rc -eq 12 ]; then
+    err "connection lost (rsync exit $rc); run the same command again to resume"
+    sed -n '1,3s/^/  /p' "$work/err" >&2
+    exit 3
+  fi
+  err "rsync exit $rc"
+  sed -n '1,3s/^/  /p' "$work/err" >&2
+fi
+[ $n_fail -eq 0 ] || exit 1
+exit 0
