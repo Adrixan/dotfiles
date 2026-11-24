@@ -198,6 +198,43 @@ class SecretsTests(Base):
         self.assertTrue(lines[3].startswith("would run [alpha] yadm-sync-all -u b"), lines)   # beta pulls, decrypts
 
 
+class YadmFailureTests(Base):
+    def test_collision_is_reported_without_fix(self):
+        a = host_data("alpha")
+        a["yadm"].update(behind=3, collide=[".zshenv"])
+        it = self.items(self.coord(a=a), "yadm")
+        texts = [i.text for i in it]
+        self.assertIn("alpha: 3 commits behind origin", texts)
+        hit = [i for i in it if ".zshenv" in i.text]
+        self.assertEqual(len(hit), 1)
+        self.assertEqual((hit[0].level, hit[0].fix), ("drift", ""))
+        self.assertIn("yadm-sync-all -n alpha", hit[0].text)
+
+    def test_fail_reason_takes_the_host_fail_line_with_its_continuation(self):
+        out = ("== xps\n  [xps13] merge --ff-only origin/master\n"
+               "  [xps13] FAIL: fast-forward failed: error: The following untracked working tree files would be "
+               "overwritten by merge:\n\t.zshenv\nPlease move or remove them before you merge.\n\n"
+               "Summary (sync):\n  xps        FAIL\n")
+        r = wss.fail_reason(out)
+        self.assertTrue(r.startswith(": [xps13] FAIL: fast-forward failed"), r)
+        self.assertTrue(r.endswith("overwritten by merge: .zshenv"), r)
+        self.assertNotIn("Summary", r)
+
+    def test_fail_reason_falls_back_to_last_line_and_empty(self):
+        self.assertEqual(wss.fail_reason("one\ntwo\n\n"), ": two")
+        self.assertEqual(wss.fail_reason(""), "")
+
+    def test_failed_act_keeps_the_reason(self):
+        c = self.coord()
+        c.dry = False
+        c.me.local = True
+        import io, contextlib
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok = c.act(c.me, "demo", "echo '  [alpha] FAIL: no key'; exit 1")
+        self.assertFalse(ok)
+        self.assertEqual(c.failures, ["[alpha] demo: exit 1: [alpha] FAIL: no key"])
+
+
 class UvTests(Base):
     def test_pinned_older_tool_reinstalled_unpinned(self):
         a = host_data("alpha", uv={"p": {"requirements": [{"name": "p", "specifier": "==1.0"}], "version": "1.0"}})
@@ -336,6 +373,34 @@ class HostSideTests(unittest.TestCase):
             g("fetch", "-q")
             sha = g("rev-parse", "feat").strip()
             self.assertEqual(wss.on_other_remote(w, sha, "origin/feat"), ["origin/merge/f2"])
+
+    def test_yadm_collisions_with_real_git(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                   "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_GLOBAL": "/dev/null"}
+            home, bare = Path(d) / "home", Path(d) / "repo.git"
+            home.mkdir()
+            def g(*a):
+                return subprocess.run(["git", f"--git-dir={bare}", f"--work-tree={home}", *a], env=env,
+                                      capture_output=True, text=True, check=True).stdout
+            subprocess.run(["git", "init", "-q", "--bare", "-b", "master", str(bare)], check=True, env=env)
+            (home / "base").write_text("base")
+            g("add", "base"); g("commit", "-q", "-m", "base")
+            base = g("rev-parse", "HEAD").strip()
+            for name, text in ((".zshenv", "new"), ("same", "same"), ("absent", "x")):
+                (home / name).write_text(text)
+            g("add", ".zshenv", "same", "absent"); g("commit", "-q", "-m", "add")
+            g("update-ref", "refs/remotes/origin/master", "HEAD")
+            g("reset", "-q", "--soft", base); g("rm", "-q", "--cached", ".zshenv", "same", "absent")
+            (home / ".zshenv").write_text(". \"$HOME/.cargo/env\"\n")   # untracked, other content
+            (home / "absent").unlink()                                  # not on disk: no collision
+            orig = (wss.YADM_REPO, wss.HOME)
+            wss.YADM_REPO, wss.HOME = bare, home
+            try:
+                self.assertEqual(wss.yadm_collisions(), [".zshenv"])
+            finally:
+                wss.YADM_REPO, wss.HOME = orig
 
     def test_stamp_lines(self):
         with tempfile.TemporaryDirectory() as d:

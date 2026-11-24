@@ -21,6 +21,7 @@ set -euo pipefail
 HOSTS=(schulpc xps m11x)
 
 # Rendered configs that `yadm alt` can leave at 0644 (WORKSTATION-details.md, Config ownership).
+# The host script adds every tracked X##template and its output X on top of this list.
 CHMOD_600=(
   .config/opencode/opencode.json
   .gemini/config/mcp_config.json
@@ -46,6 +47,11 @@ Local changes in tracked files:
     by the Syncthing folder agents-home): the local copy stays as an ignored file
   - any other file the incoming commits change too: the host stops before changing
     anything and prints the commands to resolve it; nothing is discarded or forced
+Untracked local files that the incoming commits add: the same bytes are replaced by the
+tracked copy; other content stops the host before changing anything (also in the dry run),
+naming the files and how to merge them (xps13 ~/.zshenv, 2026-11-23).
+Rendered templates: every X##template and its output X are set to 0600 (yadm alt copies the
+template's mode, so later automatic alts keep 0600 too).
 
 Exit status: 0 all OK, 1 a host failed, 2 usage, 3 done with warnings (e.g. push failed).
 
@@ -340,6 +346,29 @@ if [ -e .ssh/authorized_keys ] && ! g ls-files --error-unmatch .ssh/authorized_k
   untracked_keys=1
 fi
 [ ${#blockers[@]} -eq 0 ] || blocked "${blockers[@]}"
+# Untracked files in the way of files the incoming commits add: git would abort the merge.
+# Same bytes: ff_merge takes the tracked copy. Other content: stop here, before any change.
+collide=()
+mapfile -t added < <(g diff --name-only --diff-filter=A "HEAD...$up" --)
+for f in "${added[@]}"; do
+  [ "$f" = .ssh/authorized_keys ] && continue   # ff_merge handles it (backup, take upstream)
+  if [ -f "$HOME/$f" ] && ! g ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+    g show "$up:$f" 2>/dev/null | cmp -s - "$HOME/$f" || collide+=("$f")
+  fi
+done
+if [ ${#collide[@]} -gt 0 ]; then
+  say "FAIL: untracked local files that the incoming commits add with other content: ${collide[*]}"
+  say "  Nothing was changed on this host. Compare each one with the tracked version:"
+  for f in "${collide[@]}"; do
+    say "    diff <(git --git-dir=$repo show $up:$(printf '%q' "$f")) ~/$(printf '%q' "$f")"
+  done
+  say "  Carry what the local copy needs into the tracked version (commit and push it on an"
+  say "  up-to-date host), then move the local copy aside and rerun yadm-sync-all $alias_name:"
+  for f in "${collide[@]}"; do
+    say "    mv ~/$(printf '%q' "$f") ~/$(printf '%q' "$f").pre-yadm-sync"
+  done
+  exit 1
+fi
 if [ "$ahead" -gt 0 ] && [ "$behind" -gt 0 ]; then
   die "local commits diverge from $up, a fast-forward is impossible. Look: yadm log --oneline $up..HEAD; then yadm pull --rebase && yadm push"
 fi
@@ -430,6 +459,12 @@ if [ "$mode" = sync ]; then
   load_env   # env and env.local may have changed with the decrypt
 fi
 
+# Templates: chmod the sources first, so this alt and every later automatic one (any yadm git
+# command runs `yadm alt`) render 0600 copies; the outputs are chmodded below and on exit.
+while IFS= read -r f; do
+  chmod_list+=("$f")
+  chmod 600 "$HOME/$f##template" 2>/dev/null || true
+done < <(g ls-files | sed -n 's/##template$//p')
 yadm perms || die "yadm perms failed"
 say "yadm alt"
 yadm alt >/dev/null || die "yadm alt failed"

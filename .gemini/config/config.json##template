@@ -79,6 +79,11 @@
         "marketplace": "antigravity-plugins-official",
         "version": "1.2.4"
       }
+{% if yadm.hostname == "xps13" %}
+    },
+    "swarm": {
+      "enabled": true
+{% endif %}
     }
   },
   "userSettings": {
