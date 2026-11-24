@@ -226,6 +226,26 @@ def yg(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
     return run(["git", f"--git-dir={YADM_REPO}", f"--work-tree={HOME}", *args], timeout=timeout)
 
 
+def yadm_collisions(up: str = "refs/remotes/origin/master") -> list[str]:
+    """Untracked files where the incoming commits add a tracked one with other content: the fast-forward
+    aborts on them (yadm-sync-all stops before any change). Same bytes do not count: yadm-sync-all takes
+    the tracked copy. .ssh/authorized_keys does not count either: yadm-sync-all backs it up and takes upstream."""
+    added = yg("diff", "--name-only", "--diff-filter=A", f"HEAD...{up}", "--").stdout.splitlines()
+    hits = []
+    for f in added:
+        p = HOME / f
+        if f == ".ssh/authorized_keys" or not p.is_file() or yg("ls-files", "--error-unmatch", "--", f).returncode == 0:
+            continue
+        theirs = subprocess.run(["git", f"--git-dir={YADM_REPO}", "show", f"{up}:{f}"], capture_output=True, timeout=60)
+        try:
+            same = theirs.returncode == 0 and theirs.stdout == p.read_bytes()
+        except OSError:
+            same = False
+        if not same:
+            hits.append(f)
+    return hits
+
+
 def c_yadm(fetch: bool = False) -> dict:
     """yadm state plus the secrets check: archive members (at origin after a fetch) against the local
     files, in memory; reports names only."""
@@ -240,6 +260,7 @@ def c_yadm(fetch: bool = False) -> dict:
     track = yg("rev-list", "--left-right", "--count", "HEAD...refs/remotes/origin/master").stdout.split()
     res["ahead"], res["behind"] = (int(track[0]), int(track[1])) if len(track) == 2 else (0, 0)
     res["dirty"] = [x[3:] for x in yg("status", "--porcelain", "-uno").stdout.splitlines() if x]
+    res["collide"] = yadm_collisions() if res["behind"] else []
     cfg = HOME / ".config/yadm/config"
     res["cipher"] = out(["git", "config", "--file", str(cfg), "yadm.cipher"]) if cfg.exists() else ""
     res["secrets"] = archive_check(res["origin"] or "HEAD") if res["cipher"] == "gpg" else {"checked": False}
@@ -607,6 +628,20 @@ def write_stamp(kind: str, fields: list[str]) -> None:
 # ----------------------------------------------------------------------------------------------
 # Coordinator.
 
+def fail_reason(text: str) -> str:
+    """Why a step failed, for the FAILED summary: the step's own error lines (yadm-sync-all prints
+    `[host] FAIL: ...`, ws-sync's host side `FAIL ...`), each with its continuation line when it ends in a
+    colon; without such a line the last line of output. Empty when there was no output (streamed steps)."""
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+    picked: list[str] = []
+    for i, x in enumerate(lines):
+        if re.search(r"\bFAIL(ED)?\b:?", x) and not re.fullmatch(r"\S+\s+FAIL", x):  # not the summary row
+            picked.append(x + (f" {lines[i + 1]}" if x.endswith(":") and i + 1 < len(lines) else ""))
+    picked = picked or lines[-1:]
+    reason = " | ".join(picked)
+    return f": {reason[:500]}" if reason else ""
+
+
 @dataclass
 class Host:
     name: str
@@ -721,7 +756,7 @@ class Coordinator:
             for line in text.splitlines()[-25:]:
                 self.say(f"    {line}")
         if r.returncode != 0:
-            self.failures.append(f"{tag} {desc}: exit {r.returncode}")
+            self.failures.append(f"{tag} {desc}: exit {r.returncode}{fail_reason(text)}")
         return r.returncode == 0
 
     def act_py(self, host: Host, desc: str, *args: str, timeout: int = 900) -> bool:
@@ -731,10 +766,11 @@ class Coordinator:
             return True
         self.say(f"  {tag} {desc}")
         r = host.py(*args, timeout=timeout)
-        for line in (r.stdout + r.stderr).strip().splitlines()[-40:]:
+        text = (r.stdout + r.stderr).strip()
+        for line in text.splitlines()[-40:]:
             self.say(f"    {line}")
         if r.returncode != 0:
-            self.failures.append(f"{tag} {desc}: exit {r.returncode}")
+            self.failures.append(f"{tag} {desc}: exit {r.returncode}{fail_reason(text)}")
         return r.returncode == 0
 
     # -- reachability, lock, collect --
@@ -843,6 +879,10 @@ class Coordinator:
                 continue
             if y.get("behind"):
                 self.add("yadm", f"{h.name}: {y['behind']} commits behind origin", fix="yadm-sync-all")
+            if y.get("collide"):
+                self.add("yadm", f"{h.name}: untracked {', '.join(y['collide'][:6])} differ from the files the pull adds; "
+                         f"yadm-sync-all stops there (merge the content into the tracked version, move the local copy "
+                         f"aside; details: yadm-sync-all -n {h.ssh})")
             if y.get("ahead"):
                 self.add("yadm", f"{h.name}: {y['ahead']} unpushed yadm commits",
                          fix="yadm push" if not y.get("behind") else "")
