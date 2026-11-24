@@ -81,7 +81,7 @@ if [ "$mode" = sync ]; then
 fi
 exec </dev/null
 
-host=$(hostname -s 2>/dev/null || hostname)
+host=$(uname -n); host=${host%%.*}  # uname: also where hostname(1) is missing (Termux)
 say() { printf '  [%s] %s\n' "$host" "$*"; }
 die() { printf '  [%s] FAIL: %s\n' "$host" "$*"; exit 1; }
 
@@ -472,7 +472,7 @@ for h in "${HOSTS[@]}"; do
 done
 [ ${#targets[@]} -gt 0 ] || { echo "no hosts selected" >&2; exit 2; }
 
-local_host=$(hostname -s 2>/dev/null || hostname)
+local_host=$(uname -n); local_host=${local_host%%.*}
 mode=sync
 [ "$decrypt" = 1 ] || mode=nodecrypt
 [ "$dry_run" = 1 ] && mode=check
