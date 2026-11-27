@@ -20,15 +20,8 @@ export PATH
 # Termux: Android reports the host name "localhost"; name it so prompts tell the phone apart.
 [[ -n ${TERMUX_VERSION:-} && $HOST == localhost ]] && HOST=termux
 
-agy-termux() {
-  hash -r
-  agy-va39 "$@"
-}
-
-a-termux() {
-  hash -r
-  agy-va39 "$@"
-}
+# Old names from the patched glibc build; since 2026-11-27 the phone runs the native Android agy.
+alias agy-termux=agy a-termux=agy
 
 # Ph.D. research stack (2026-09-02)
 [ -f ~/.research_stack.env ] && . ~/.research_stack.env
