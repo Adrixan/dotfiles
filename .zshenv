@@ -6,3 +6,6 @@ typeset -U path PATH
 [[ -r "$HOME/.cargo/env" ]] && . "$HOME/.cargo/env"
 path=("$HOME/.local/bin" /usr/local/bin(N/) $path)  # (N/): only if it exists (not in Termux)
 export PATH
+# Termux: Android denies hard links in app storage, so uv copies at once instead of warning
+# "Failed to hardlink files" on every tool upgrade.
+[[ -n ${TERMUX_VERSION:-} ]] && export UV_LINK_MODE=copy
