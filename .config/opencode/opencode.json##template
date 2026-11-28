@@ -136,25 +136,6 @@
 {% else %}
       "markitdown": {"type": "remote", "url": "http://127.0.0.1:8790/servers/markitdown/mcp", "oauth": false},
 {% endif %}
-{% if env.TERMUX_VERSION != "" %}
-      "nextcloud": {
-        "type": "local",
-        "command": [
-          "{{ env.HOME }}/.local/bin/nextcloud-mcp-server",
-          "run",
-          "--transport",
-          "stdio"
-        ],
-        "environment": {
-          "NEXTCLOUD_HOST": "{{ env.NEXTCLOUD_HOST }}",
-          "NEXTCLOUD_USERNAME": "{{ env.NEXTCLOUD_USERNAME }}",
-          "NEXTCLOUD_PASSWORD": "{{ env.NEXTCLOUD_PASSWORD }}"
-        },
-        "disabled": false
-      },
-{% else %}
-      "nextcloud": {"type": "remote", "url": "http://127.0.0.1:8790/servers/nextcloud/mcp", "oauth": false, "disabled": false},
-{% endif %}
 {% if env.TERMUX_VERSION == "" %}
       "ptsd": {"type": "remote", "url": "http://127.0.0.1:8790/servers/ptsd/mcp", "oauth": false},
       "file-accountant": {"type": "remote", "url": "http://127.0.0.1:8790/servers/file-accountant/mcp", "oauth": false},
@@ -184,25 +165,25 @@
       "youtube-transcript": {"type": "remote", "url": "http://127.0.0.1:8790/servers/youtube-transcript/mcp", "oauth": false},
       "thunderbird": {"type": "remote", "url": "http://127.0.0.1:8790/servers/thunderbird/mcp", "oauth": false},
 {% endif %}
-      "newspaper-testground": {
+{% if env.TERMUX_VERSION != "" %}
+      "nextcloud": {
         "type": "local",
         "command": [
-          "ssh",
-          "-T",
-          "-o",
-          "BatchMode=yes",
-          "-o",
-          "ConnectTimeout=10",
-          "-o",
-          "ServerAliveInterval=30",
-          "ubuntu@testground.code-alongsi.de",
-          "cd ~/nexcloud-offline-newspaper && exec ~/.local/bin/uv run --quiet offline-newspaper-mcp --vault-path /home/ubuntu/news_vault --allow-write"
+          "{{ env.HOME }}/.local/bin/nextcloud-mcp-server",
+          "run",
+          "--transport",
+          "stdio"
         ],
-        "timeout": {
-          "startup": 30000,
-          "catalog": 30000
-        }
+        "environment": {
+          "NEXTCLOUD_HOST": "{{ env.NEXTCLOUD_HOST }}",
+          "NEXTCLOUD_USERNAME": "{{ env.NEXTCLOUD_USERNAME }}",
+          "NEXTCLOUD_PASSWORD": "{{ env.NEXTCLOUD_PASSWORD }}"
+        },
+        "disabled": false
       }
+{% else %}
+      "nextcloud": {"type": "remote", "url": "http://127.0.0.1:8790/servers/nextcloud/mcp", "oauth": false, "disabled": false}
+{% endif %}
     }
   }
 }
